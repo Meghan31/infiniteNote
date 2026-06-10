@@ -19,6 +19,10 @@ struct NotebookEditorView: View {
     /// Read-only mode: drawing/editing disabled; pages turn with 3-finger
     /// horizontal swipes; the toolbar collapses to just the read-mode icon.
     @State private var isReadOnly = false
+    /// Write-only (focus) mode: every bar, sidebar and overlay hides — only
+    /// the paper is left to write on. Exit via the small floating corner
+    /// button over the canvas.
+    @State private var isFocusMode = false
 
     // Drawing tool state
     @State private var selectedTool: DrawingToolType = .pen
@@ -101,38 +105,34 @@ struct NotebookEditorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            fileTabBar
+            if !isFocusMode {
+                fileTabBar
+                    .transition(.move(edge: .top).combined(with: .opacity))
 
-            // Pen + undo toolbar now lives at the TOP of the notes area.
-            drawingToolbar
+                // Pen + undo toolbar now lives at the TOP of the notes area.
+                drawingToolbar
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
 
             HStack(spacing: 0) {
-                if showPageSidebar {
+                if showPageSidebar && !isFocusMode {
                     pageSidebar
                         .transition(.move(edge: .leading).combined(with: .opacity))
                 }
 
                 ZStack(alignment: .leading) {
-                    canvasBackground
-                    DrawingCanvasView(
-                        drawing: Binding(get: { viewModel.drawing }, set: { viewModel.onDrawingChanged($0) }),
-                        isRulerActive: viewModel.isRulerActive,
-                        toolType: selectedTool,
-                        color: UIColor(selectedColor),
-                        lineWidth: currentSize,
-                        isDarkTheme: themeManager.isDark,
-                        isReadOnly: isReadOnly,
-                        canvasController: viewModel.canvasController,
-                        onErasePage: { showErasePageConfirm = true },
-                        onNextPage: { handleSwipeUpNext() },     // 3-finger up / read-only swipe left
-                        onPrevPage: { handleSwipeDownPrev() }    // 3-finger down / read-only swipe right
-                    )
-                    pageFooter
+                    paperCanvas
+                    if !isFocusMode { pageFooter }
                     if let hint = pageHintText {
                         pageHintBubble(hint)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                             .allowsHitTesting(false)
                             .transition(.scale(scale: 0.85).combined(with: .opacity))
+                    }
+                    if isFocusMode {
+                        focusExitButton
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                            .transition(.scale(scale: 0.8).combined(with: .opacity))
                     }
                 }
             }
@@ -143,6 +143,9 @@ struct NotebookEditorView: View {
         .navigationBarBackButtonHidden(true)
         .toolbar { editorToolbar }
         .toolbar(removing: .sidebarToggle)
+        // Write-only mode: navigation bar and status bar go away too.
+        .toolbar(isFocusMode ? .hidden : .visible, for: .navigationBar)
+        .statusBarHidden(isFocusMode)
         .background(SidebarToggleHider().frame(width: 0, height: 0))
         .onAppear { viewModel.load() }
         .onDisappear { viewModel.saveCurrentDrawing() }
@@ -290,24 +293,30 @@ struct NotebookEditorView: View {
 
     private var editingToolbarRow: some View {
         HStack(spacing: 0) {
-                // Sidebar toggle.
-                JigglingIconButton(duration: 0.2, action: {
-                    withAnimation(.easeOut(duration: 0.22)) { showPageSidebar.toggle() }
-                }) {
-                    AssetIcon(
-                        asset: themeManager.isDark ? "page-sidebar-white" : "page-sidebar",
-                        systemName: showPageSidebar ? "sidebar.squares.left" : "sidebar.left",
-                        size: 35,
-                        fallbackTint: themeManager.iconTint,
-                        addsDepth: false
-                    )
-                    .frame(width: 48, height: 48)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain).padding(.leading, 4)
-                .accessibilityLabel("Toggle page sidebar")
+                // Sidebar toggle — hidden while the toolkit is expanded so the
+                // extra pens never trim the buttons at either end of the bar.
+                if !showMoreTools {
+                    Group {
+                        JigglingIconButton(duration: 0.2, action: {
+                            withAnimation(.easeOut(duration: 0.22)) { showPageSidebar.toggle() }
+                        }) {
+                            AssetIcon(
+                                asset: themeManager.isDark ? "page-sidebar-white" : "page-sidebar",
+                                systemName: showPageSidebar ? "sidebar.squares.left" : "sidebar.left",
+                                size: 35,
+                                fallbackTint: themeManager.iconTint,
+                                addsDepth: false
+                            )
+                            .frame(width: 48, height: 48)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain).padding(.leading, 4)
+                        .accessibilityLabel("Toggle page sidebar")
 
-                toolbarDivider
+                        toolbarDivider
+                    }
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+                }
 
                 // Tool selector — the full pen set
                 toolKitCapsule
@@ -332,16 +341,24 @@ struct NotebookEditorView: View {
                 }
                 .buttonStyle(.plain)
                 .popover(isPresented: $showStylePicker, attachmentAnchor: .rect(.bounds), arrowEdge: .top) { pageStylePopover }
+                .padding(.trailing, showMoreTools ? 8 : 0)
 
-                toolbarDivider
+                // Undo / Redo + read-only + write-only — hidden while the
+                // toolkit is expanded (same reason as the sidebar toggle).
+                if !showMoreTools {
+                    Group {
+                        toolbarDivider
 
-                // Undo / Redo + read-only toggle
-                HStack(spacing: 0) {
-                    toolbarActionButton(icon: "arrow.uturn.backward") { viewModel.undo() }
-                    toolbarActionButton(icon: "arrow.uturn.forward")  { viewModel.redo() }
-                    readOnlyToggleButton
+                        HStack(spacing: 0) {
+                            toolbarActionButton(icon: "arrow.uturn.backward") { viewModel.undo() }
+                            toolbarActionButton(icon: "arrow.uturn.forward")  { viewModel.redo() }
+                            readOnlyToggleButton
+                            writeOnlyButton
+                        }
+                        .padding(.trailing, 4)
+                    }
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
-                .padding(.trailing, 4)
         }
         .frame(height: 62)
         .background(themeManager.card)
@@ -370,6 +387,46 @@ struct NotebookEditorView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(isReadOnly ? "Exit read-only mode" : "Read-only mode")
+    }
+
+    /// Enters write-only (focus) mode: hides every bar, sidebar and overlay
+    /// so only the paper is left — distraction-free writing.
+    private var writeOnlyButton: some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.25)) { isFocusMode = true }
+            showPageHint("Write-only mode — tap the corner button to exit")
+        } label: {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(themeManager.iconTint)
+                .frame(width: 42, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Write-only mode")
+    }
+
+    /// Floating exit for write-only mode — the only chrome left on screen.
+    private var focusExitButton: some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.25)) { isFocusMode = false }
+        } label: {
+            Image(systemName: "arrow.down.right.and.arrow.up.left")
+                .font(.system(size: 14, weight: .heavy))
+                .foregroundStyle(themeManager.iconTint)
+                .frame(width: 40, height: 40)
+                .background(Circle().fill(themeManager.card.opacity(0.92)))
+                .overlay(Circle().strokeBorder(themeManager.outline.opacity(0.45), lineWidth: 1.5))
+                .background(
+                    Circle()
+                        .fill(themeManager.hardShadow.opacity(0.25))
+                        .offset(x: 2, y: 2.5)
+                )
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .padding(12)
+        .accessibilityLabel("Exit write-only mode")
     }
 
     // MARK: - Page Style Popover
@@ -473,6 +530,42 @@ struct NotebookEditorView: View {
         }
     }
 
+    // MARK: - Fixed Paper Canvas
+
+    /// The page is a CONSTANT-size sheet of paper (`PaperSpec.size`, A4
+    /// portrait) in EVERY mode — normal, write-only, sidebar open or closed,
+    /// any device orientation. The sheet scales to fit the available area
+    /// (like paper on a desk), so strokes always live in the same paper
+    /// coordinates and the exported PDF can never trim them.
+    private var paperCanvas: some View {
+        GeometryReader { geo in
+            let fit = max(0.01, min(geo.size.width / PaperSpec.size.width,
+                                    geo.size.height / PaperSpec.size.height))
+            ZStack {
+                canvasBackground
+                DrawingCanvasView(
+                    drawing: Binding(get: { viewModel.drawing }, set: { viewModel.onDrawingChanged($0) }),
+                    isRulerActive: viewModel.isRulerActive,
+                    toolType: selectedTool,
+                    color: UIColor(selectedColor),
+                    lineWidth: currentSize,
+                    isDarkTheme: themeManager.isDark,
+                    isReadOnly: isReadOnly,
+                    canvasController: viewModel.canvasController,
+                    onErasePage: { showErasePageConfirm = true },
+                    onNextPage: { handleSwipeUpNext() },     // 3-finger up / read-only swipe left
+                    onPrevPage: { handleSwipeDownPrev() }    // 3-finger down / read-only swipe right
+                )
+            }
+            .frame(width: PaperSpec.size.width, height: PaperSpec.size.height)
+            // Thin paper edge so the sheet reads against the desk background.
+            .overlay(Rectangle().strokeBorder(themeManager.outline.opacity(0.35), lineWidth: 2))
+            .scaleEffect(fit)
+            .shadow(color: .black.opacity(themeManager.isDark ? 0.45 : 0.14), radius: 14, y: 6)
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
+    }
+
     // MARK: - Canvas Background
 
     private var canvasBackground: some View {
@@ -534,7 +627,6 @@ struct NotebookEditorView: View {
                 }
             }
         }
-        .ignoresSafeArea(edges: .bottom)
     }
 
     // MARK: - Page Footer
@@ -972,8 +1064,9 @@ struct NotebookEditorView: View {
     /// Saves the current page, then renders the whole notebook to a temp PDF.
     private func makeNotebookPDF() -> URL? {
         viewModel.saveCurrentDrawing()
-        // The PKCanvasView bounds are the coordinate space the strokes live in —
-        // pass them so the PDF scales the drawing to fill the page correctly.
+        // The canvas always draws on the constant `PaperSpec` paper, so the
+        // PDF page is 1:1 with the screen in every mode; the canvasSize
+        // parameter is legacy and no longer affects the page size.
         let canvasSize = viewModel.canvasController.canvasView?.bounds.size
         do {
             return try PDFGenerator.shared.generatePDF(for: notebook, canvasSize: canvasSize)

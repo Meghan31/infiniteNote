@@ -3,32 +3,32 @@ import PencilKit
 import PDFKit
 import UIKit
 
+/// The single, constant paper coordinate space used EVERYWHERE: the on-screen
+/// canvas (every mode — normal, write-only, sidebar open/closed), thumbnails,
+/// sync snapshots, and exported PDF pages. A4 portrait at ~144 dpi
+/// (210mm × 297mm). Because every mode draws on this exact same fixed paper,
+/// nothing written can ever fall outside an exported page.
+enum PaperSpec {
+    static let size = CGSize(width: 1190, height: 1684)
+}
+
 final class PDFGenerator {
     static let shared = PDFGenerator()
     private init() {}
 
-    /// A4 portrait long edge in points at ~144 dpi. Short edge is derived from
-    /// the canvas aspect ratio so the PDF page matches what was drawn on screen.
-    private let a4LongSide: CGFloat = 1684          // 297mm
-    private let a4ShortSide: CGFloat = 1190         // 210mm
-
-    /// Fallback canvas size (A4 portrait proportions) when the live canvas
-    /// size is unavailable.
-    private let defaultCanvasSize = CGSize(width: 1190, height: 1684)
-
-    /// Generates a PDF for `notebook`.
-    /// - Parameter canvasSize: the on-screen drawing coordinate space (the
-    ///   PKCanvasView bounds). Strokes live in this space, so it's needed to
-    ///   scale them correctly onto the page. Defaults to A4 proportions.
+    /// Generates a PDF for `notebook`. Every page is the constant A4 paper
+    /// (`PaperSpec.size`) — the same coordinate space the canvas draws in, so
+    /// the exported page is 1:1 with the screen.
+    /// - Parameter canvasSize: legacy parameter, kept for call-site
+    ///   compatibility. The page size is constant and no longer derived from
+    ///   the live canvas bounds.
     func generatePDF(for notebook: Notebook, canvasSize: CGSize? = nil) throws -> URL {
+        _ = canvasSize
         let pages = try DrawingService.shared.pages(for: notebook.id)
         guard !pages.isEmpty else { throw PDFError.noPages }
 
-        // Stroke coordinate space.
-        let source = sanitizedCanvasSize(canvasSize)
-        // PDF page keeps the canvas aspect ratio, scaled up to A4-ish resolution.
-        let pageSize = a4PageSize(matching: source)
-        let scale = pageSize.width / source.width   // uniform (aspect preserved)
+        // Constant paper — identical for all notebooks, modes, and devices.
+        let pageSize = PaperSpec.size
 
         let pdfData = NSMutableData()
         UIGraphicsBeginPDFContextToData(pdfData, CGRect(origin: .zero, size: pageSize), nil)
@@ -45,13 +45,26 @@ final class PDFGenerator {
             ctx.setFillColor(UIColor.white.cgColor)
             ctx.fill(CGRect(origin: .zero, size: pageSize))
 
-            // Draw the page's actual style (plain draws nothing).
-            drawBackground(for: page.pageStyle, in: ctx, pageSize: pageSize, scale: scale)
+            // Draw the page's actual style (plain draws nothing). Scale 1 —
+            // the canvas and the PDF page share the same coordinate space.
+            drawBackground(for: page.pageStyle, in: ctx, pageSize: pageSize, scale: 1)
 
-            // Render strokes in a forced-light trait so ink never inverts to
-            // white on the white page, then scale to fill the page 1:1.
+            // Strokes live in paper coordinates, so they normally render 1:1.
+            // Legacy strokes (drawn before the fixed paper existed) may extend
+            // past the page — render from the union of paper and stroke bounds
+            // and fit it onto the page, so NOTHING is ever trimmed.
+            let bounds = drawing.bounds
+            let source = CGSize(
+                width: max(pageSize.width, bounds.isNull ? 0 : bounds.maxX),
+                height: max(pageSize.height, bounds.isNull ? 0 : bounds.maxY)
+            )
+            let fit = min(pageSize.width / source.width, pageSize.height / source.height)
+            // Render in a forced-light trait so ink never inverts to white.
             let strokeImage = renderStrokeImage(drawing, source: source)
-            strokeImage.draw(in: CGRect(origin: .zero, size: pageSize))
+            strokeImage.draw(in: CGRect(
+                origin: .zero,
+                size: CGSize(width: source.width * fit, height: source.height * fit)
+            ))
 
             drawPageNumber(page.pageNumber, totalPages: pages.count, in: ctx, pageSize: pageSize)
         }
@@ -293,28 +306,7 @@ final class PDFGenerator {
         return plateRect
     }
 
-    // MARK: - Sizing
-
-    private func sanitizedCanvasSize(_ size: CGSize?) -> CGSize {
-        guard let size, size.width > 1, size.height > 1 else { return defaultCanvasSize }
-        return size
-    }
-
-    /// A page that preserves the canvas aspect ratio at A4-ish resolution.
-    private func a4PageSize(matching source: CGSize) -> CGSize {
-        let portrait = source.height >= source.width
-        let longSide = a4LongSide
-        let aspect = source.width / source.height
-        if portrait {
-            let height = longSide
-            let width = height * aspect
-            return CGSize(width: width, height: height)
-        } else {
-            let width = longSide
-            let height = width / aspect
-            return CGSize(width: width, height: height)
-        }
-    }
+    // MARK: - Stroke Rendering
 
     /// Renders the drawing into a UIImage matching the source coordinate space,
     /// forcing a light appearance so ink colors aren't inverted.
