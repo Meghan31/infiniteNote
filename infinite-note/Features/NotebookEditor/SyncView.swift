@@ -21,10 +21,8 @@ struct SyncView: View {
                     ZStack {
                         Circle()
                             .fill(iconBackground)
-                            .frame(width: 88, height: 88)
-                        Image(systemName: iconName)
-                            .font(.system(size: 34, weight: .light))
-                            .foregroundStyle(iconForeground)
+                            .frame(width: 96, height: 96)
+                        statusIcon
                     }
                     .padding(.bottom, 28)
 
@@ -82,7 +80,7 @@ struct SyncView: View {
             Task { await sync() }
         } label: {
             HStack(spacing: 8) {
-                Image(systemName: "icloud.and.arrow.up.fill")
+                AssetIcon(asset: "cloud-sync", systemName: "icloud.and.arrow.up.fill", size: 28, fallbackTint: .white)
                 Text("Sync Notebook")
             }
             .font(.system(size: 16, weight: .medium))
@@ -107,12 +105,19 @@ struct SyncView: View {
         }
     }
 
-    private var iconName: String {
+    @ViewBuilder
+    private var statusIcon: some View {
         switch syncState {
-        case .idle:    return "icloud.and.arrow.up"
-        case .syncing: return "arrow.trianglehead.2.counterclockwise.rotate.90"
-        case .success: return "checkmark.circle"
-        case .failure: return "exclamationmark.triangle"
+        case .idle, .syncing:
+            AssetIcon(asset: "cloud-sync", systemName: "icloud.and.arrow.up", size: 60, fallbackTint: iconForeground)
+        case .success:
+            Image(systemName: "checkmark.circle")
+                .font(.system(size: 34, weight: .light))
+                .foregroundStyle(iconForeground)
+        case .failure:
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 34, weight: .light))
+                .foregroundStyle(iconForeground)
         }
     }
 

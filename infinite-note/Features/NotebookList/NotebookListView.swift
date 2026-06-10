@@ -6,6 +6,7 @@ struct NotebookListView: View {
     @State private var viewModel = NotebookListViewModel()
     @State private var selectedNotebook: Notebook?
     @State private var openNotebooks: [Notebook] = []
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     @State private var showCreateSheet = false
     @State private var notebookToRename: Notebook?
@@ -22,7 +23,7 @@ struct NotebookListView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebar.navigationSplitViewColumnWidth(min: 280, ideal: 380, max: 480)
         } detail: {
             if let notebook = selectedNotebook {
@@ -46,13 +47,15 @@ struct NotebookListView: View {
                             openNotebooks.removeAll()
                             selectedNotebook = nil
                         }
-                    }
+                    },
+                    onToggleBooksSidebar: { toggleBooksSidebar() }
                 )
                 .id(notebook.id)
             } else {
                 detailPlaceholder
             }
         }
+        .toolbar(removing: .sidebarToggle)
         .onAppear { viewModel.loadNotebooks() }
         // Create sheet — uses proper View struct so @State works
         .sheet(isPresented: $showCreateSheet) {
@@ -188,6 +191,31 @@ struct NotebookListView: View {
                 .buttonStyle(CartoonButtonStyle(fill: .burgundy))
                 .padding(.top, 4)
             }
+        }
+        .navigationBarBackButtonHidden(true)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button { toggleBooksSidebar() } label: {
+                    AssetIcon(
+                        asset: "book-sidebar",
+                        systemName: "sidebar.left",
+                        size: 34,
+                        fallbackTint: themeManager.iconTint
+                    )
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Toggle books sidebar")
+            }
+        }
+        .toolbar(removing: .sidebarToggle)
+        .background(SidebarToggleHider().frame(width: 0, height: 0))
+    }
+
+    private func toggleBooksSidebar() {
+        withAnimation(.easeOut(duration: 0.22)) {
+            columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
         }
     }
 

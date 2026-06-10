@@ -9,6 +9,7 @@ struct NotebookEditorView: View {
     let onSelectNotebook: (Notebook) -> Void
     let onCloseNotebook: (Notebook) -> Void
     let onGoHome: () -> Void
+    let onToggleBooksSidebar: () -> Void
 
     @State private var viewModel: NotebookEditorViewModel
     @State private var showSyncSheet = false
@@ -67,13 +68,15 @@ struct NotebookEditorView: View {
         openNotebooks: [Notebook] = [],
         onSelectNotebook: @escaping (Notebook) -> Void = { _ in },
         onCloseNotebook: @escaping (Notebook) -> Void = { _ in },
-        onGoHome: @escaping () -> Void = {}
+        onGoHome: @escaping () -> Void = {},
+        onToggleBooksSidebar: @escaping () -> Void = {}
     ) {
         self.notebook = notebook
         self.openNotebooks = openNotebooks
         self.onSelectNotebook = onSelectNotebook
         self.onCloseNotebook = onCloseNotebook
         self.onGoHome = onGoHome
+        self.onToggleBooksSidebar = onToggleBooksSidebar
         self._viewModel = State(initialValue: NotebookEditorViewModel(notebook: notebook))
     }
 
@@ -121,7 +124,10 @@ struct NotebookEditorView: View {
         .background(themeManager.background)
         .navigationTitle(notebook.title)
         .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
         .toolbar { editorToolbar }
+        .toolbar(removing: .sidebarToggle)
+        .background(SidebarToggleHider().frame(width: 0, height: 0))
         .onAppear { viewModel.load() }
         .onDisappear { viewModel.saveCurrentDrawing() }
         .sheet(isPresented: $showSyncSheet) { SyncView(notebook: notebook) }
@@ -172,11 +178,18 @@ struct NotebookEditorView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     Button { showHomeAlert = true } label: {
-                        AssetIcon(asset: "home", systemName: "house.fill", size: 17, fallbackTint: themeManager.iconTint, symbolWeight: .bold)
-                            .padding(.horizontal, 11).padding(.vertical, 6)
-                            .background(Capsule().fill(themeManager.iconTint.opacity(0.14)))
+                        AssetIcon(
+                            asset: "home",
+                            systemName: "house.fill",
+                            size: 30,
+                            fallbackTint: themeManager.iconTint,
+                            symbolWeight: .bold
+                        )
+                        .frame(width: 40, height: 40)
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Home")
                     if !openNotebooks.isEmpty {
                         RoundedRectangle(cornerRadius: 1).fill(themeManager.border).frame(width: 1, height: 16)
                     }
@@ -186,7 +199,7 @@ struct NotebookEditorView: View {
                 .padding(.horizontal, 10).padding(.vertical, 6)
             }
         }
-        .frame(height: 44)
+        .frame(height: 50)
     }
 
     private func fileTab(for nb: Notebook) -> some View {
@@ -229,20 +242,25 @@ struct NotebookEditorView: View {
     private var drawingToolbar: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                // Sidebar toggle — active gets a tinted chip, idle is plain.
+                // Sidebar toggle.
                 Button { withAnimation(.easeOut(duration: 0.22)) { showPageSidebar.toggle() } } label: {
-                    AssetIcon(asset: "page-sidebar", systemName: showPageSidebar ? "sidebar.squares.left" : "sidebar.left", size: 24, fallbackTint: themeManager.iconTint)
-                        .frame(width: 44, height: 44)
-                        .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .fill(showPageSidebar ? themeManager.selectionColor.opacity(0.22) : .clear))
+                    AssetIcon(
+                        asset: "page-sidebar",
+                        systemName: showPageSidebar ? "sidebar.squares.left" : "sidebar.left",
+                        size: 35,
+                        fallbackTint: themeManager.iconTint,
+                        addsDepth: false
+                    )
+                    .frame(width: 48, height: 48)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain).padding(.leading, 4)
+                .accessibilityLabel("Toggle page sidebar")
 
                 toolbarDivider
 
                 // Tool selector — the full pen set
-                HStack(spacing: 1) { ForEach(DrawingToolType.allCases, id: \.self) { toolButton($0) } }
-                    .padding(.horizontal, 6)
+                toolKitCapsule
 
                 toolbarDivider
 
@@ -274,7 +292,7 @@ struct NotebookEditorView: View {
                 }
                 .padding(.trailing, 4)
             }
-            .frame(height: 52)
+            .frame(height: 62)
             .background(themeManager.card)
 
             // Heavy ink rule under the bar — it sits at the top of the page now.
@@ -530,23 +548,138 @@ struct NotebookEditorView: View {
 
     // MARK: - Toolbar Subviews
 
+    private var toolKitCapsule: some View {
+        HStack(spacing: 4) {
+            ForEach(DrawingToolType.allCases, id: \.self) { toolButton($0) }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(
+            Capsule(style: .continuous)
+                .fill(themeManager.card)
+                .overlay(
+                    Capsule(style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(themeManager.isDark ? 0.14 : 0.75),
+                                    Color.clear,
+                                    Color.black.opacity(themeManager.isDark ? 0.26 : 0.08)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                )
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(themeManager.isDark ? 0.24 : 0.85),
+                            themeManager.outline.opacity(themeManager.isDark ? 0.58 : 0.26)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1.6
+                )
+        )
+        .background(
+            Capsule(style: .continuous)
+                .fill(themeManager.hardShadow.opacity(themeManager.isDark ? 0.62 : 0.24))
+                .offset(x: 3.5, y: 4.5)
+        )
+        .shadow(color: .black.opacity(themeManager.isDark ? 0.34 : 0.16), radius: 5, x: 1.5, y: 3)
+        .padding(.horizontal, 8)
+    }
+
     private func toolButton(_ tool: DrawingToolType) -> some View {
         let isSelected = selectedTool == tool
-        // One universal icon tint; the selected tool gets a chunky outlined chip.
+        // One universal icon tint; the selected tool gets a circular chip.
         return Button { withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { selectedTool = tool } } label: {
             toolGlyph(tool, isSelected: isSelected)
-                .frame(width: 40, height: 40)
+                .frame(width: 39, height: 39)
                 .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    Circle()
                         .fill(isSelected ? themeManager.selectionColor : Color.clear)
                 )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(isSelected ? themeManager.outline : Color.clear, lineWidth: 2)
+                .background(
+                    Circle()
+                        .fill(isSelected ? themeManager.hardShadow.opacity(0.28) : Color.clear)
+                        .offset(x: 2, y: 2.5)
                 )
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(tool.label)
+    }
+
+    private var exportActionsCapsule: some View {
+        HStack(spacing: 2) {
+            Button { downloadPDF() } label: {
+                capsuleActionIcon(asset: "download", systemName: "arrow.down.circle", size: 32)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Download PDF")
+
+            Button { sharePDF() } label: {
+                capsuleActionIcon(asset: "share", systemName: "square.and.arrow.up", size: 32)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Share PDF")
+
+            Button { showSyncSheet = true } label: {
+                capsuleActionIcon(asset: "cloud-sync", systemName: "icloud.and.arrow.up", size: 33)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Sync notebook")
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(
+            Capsule(style: .continuous)
+                .fill(themeManager.selectionColor.opacity(themeManager.isDark ? 0.44 : 0.34))
+                .overlay(
+                    Capsule(style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(themeManager.isDark ? 0.18 : 0.72),
+                                    Color.clear,
+                                    Color.black.opacity(themeManager.isDark ? 0.26 : 0.10)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                )
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(
+                    Color.white.opacity(themeManager.isDark ? 0.16 : 0.48),
+                    lineWidth: 1
+                )
+        )
+        .background(
+            Capsule(style: .continuous)
+                .fill(themeManager.hardShadow.opacity(themeManager.isDark ? 0.62 : 0.28))
+                .offset(x: 3.4, y: 4)
+        )
+        .shadow(color: .black.opacity(themeManager.isDark ? 0.32 : 0.14), radius: 5, x: 1.2, y: 3)
+    }
+
+    private func capsuleActionIcon(asset: String, systemName: String, size: CGFloat) -> some View {
+        AssetIcon(
+            asset: asset,
+            systemName: systemName,
+            size: size,
+            fallbackTint: themeManager.iconTint
+        )
+        .frame(width: 38, height: 38)
+        .contentShape(Circle())
     }
 
     /// Uses the downloaded full-color tool artwork when present (always shown in
@@ -560,7 +693,7 @@ struct NotebookEditorView: View {
                 .resizable()
                 .renderingMode(.original)
                 .scaledToFit()
-                .frame(width: 24, height: 24)
+                .frame(width: 25, height: 25)
         } else {
             Image(systemName: tool.systemImage)
                 .font(.system(size: 17, weight: isSelected ? .bold : .medium))
@@ -649,26 +782,33 @@ struct NotebookEditorView: View {
         // Books (notebook list) sidebar toggle.
         ToolbarItem(placement: .navigationBarLeading) {
             Button { onToggleBooksSidebar() } label: {
-                AssetIcon(asset: "book-sidebar", systemName: "sidebar.left", size: 22, fallbackTint: themeManager.iconTint)
+                AssetIcon(
+                    asset: "book-sidebar",
+                    systemName: "sidebar.left",
+                    size: 34,
+                    fallbackTint: themeManager.iconTint
+                )
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Toggle books sidebar")
         }
         ToolbarItemGroup(placement: .navigationBarTrailing) {
             // Scale / ruler
             Button { viewModel.isRulerActive.toggle() } label: {
-                AssetIcon(asset: "scale", systemName: viewModel.isRulerActive ? "ruler.fill" : "ruler", size: 22, fallbackTint: themeManager.iconTint)
+                AssetIcon(
+                    asset: "scale",
+                    systemName: viewModel.isRulerActive ? "ruler.fill" : "ruler",
+                    size: 34,
+                    fallbackTint: themeManager.iconTint
+                )
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
             }
-            // Download PDF (save to Files)
-            Button { downloadPDF() } label: {
-                AssetIcon(asset: "download", systemName: "arrow.down.circle", size: 22, fallbackTint: themeManager.iconTint)
-            }
-            // Share PDF (to other apps)
-            Button { sharePDF() } label: {
-                AssetIcon(asset: "share", systemName: "square.and.arrow.up", size: 22, fallbackTint: themeManager.iconTint)
-            }
-            // Sync
-            Button { showSyncSheet = true } label: {
-                AssetIcon(asset: "cloud-sync", systemName: "icloud.and.arrow.up", size: 22, fallbackTint: themeManager.iconTint)
-            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Toggle ruler")
+            exportActionsCapsule
         }
     }
 

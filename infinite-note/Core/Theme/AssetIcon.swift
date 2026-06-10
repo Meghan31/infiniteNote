@@ -14,19 +14,26 @@ struct AssetIcon: View {
     var size: CGFloat = 22
     var fallbackTint: Color = .primary
     var symbolWeight: Font.Weight = .semibold
+    var addsDepth: Bool = true
 
     var body: some View {
-        if UIImage(named: asset) != nil {
-            Image(asset)
-                .resizable()
-                .renderingMode(.original)
-                .scaledToFit()
-                .frame(width: size, height: size)
-        } else {
-            Image(systemName: systemName)
-                .font(.system(size: size * 0.82, weight: symbolWeight))
-                .foregroundStyle(fallbackTint)
-                .frame(width: size, height: size)
+        Group {
+            if UIImage(named: asset) != nil {
+                Image(asset)
+                    .resizable()
+                    .renderingMode(.original)
+                    .scaledToFit()
+                    .frame(width: size, height: size)
+            } else {
+                Image(systemName: systemName)
+                    .font(.system(size: size * 0.82, weight: symbolWeight))
+                    .foregroundStyle(fallbackTint)
+                    .frame(width: size, height: size)
+            }
         }
+        .shadow(color: addsDepth ? .white.opacity(0.62) : .clear, radius: 0, x: -0.8, y: -0.8)
+        .shadow(color: addsDepth ? Color(red: 0.08, green: 0.09, blue: 0.14).opacity(0.56) : .clear, radius: 0, x: 2.6, y: 3.4)
+        .shadow(color: addsDepth ? .black.opacity(0.36) : .clear, radius: 2.6, x: 3.4, y: 4.4)
+        .shadow(color: addsDepth ? .black.opacity(0.20) : .clear, radius: 7, x: 4.2, y: 6)
     }
 }
