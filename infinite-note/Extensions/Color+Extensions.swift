@@ -47,11 +47,11 @@ extension Color {
     //   Dark:  deep blue-ink backgrounds, raised slate cards, cream text.
 
     static let themeBackgroundLight = Color(hex: "FFF7E9")   // warm cream paper
-    static let themeBackgroundDark  = Color(hex: "14131F")   // deep blue-ink
-    static let themePageLight       = Color(hex: "FFFDF6")   // bright page
-    static let themePageDark        = Color(hex: "1B1A29")   // dim page
+    static let themeBackgroundDark  = Color(hex: "232233")   // slate (lets hard shadows read)
+    static let themePageLight       = Color(hex: "FFFFFF")   // pure white page (ink-friendly)
+    static let themePageDark        = Color(hex: "000000")   // pure black page (ink-friendly)
     static let themeCardLight       = Color(hex: "FFFFFF")   // clean white card
-    static let themeCardDark        = Color(hex: "242335")   // raised slate card
+    static let themeCardDark        = Color(hex: "302E45")   // raised slate card (lifts off bg)
     static let themeTextLight       = Color(hex: "1C1B2E")   // ink
     static let themeTextDark        = Color(hex: "FBF6EA")   // cream
 

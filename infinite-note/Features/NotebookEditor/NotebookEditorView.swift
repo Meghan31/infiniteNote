@@ -1,6 +1,7 @@
 import SwiftUI
 import PencilKit
 import PhotosUI
+import UniformTypeIdentifiers
 
 struct NotebookEditorView: View {
     let notebook: Notebook
@@ -15,6 +16,9 @@ struct NotebookEditorView: View {
 
     // Drawing tool state
     @State private var selectedTool: DrawingToolType = .pen
+    /// Default ink is black. PencilKit renders it black on a white (light)
+    /// page and automatically inverts it to white on a black (dark) page,
+    /// because the canvas's interface style is pinned to our theme.
     @State private var selectedColor: Color = .black
     @State private var toolSizes: [DrawingToolType: CGFloat] = [
         .pen: 3, .marker: 15, .highlighter: 25, .eraser: 20
@@ -29,10 +33,24 @@ struct NotebookEditorView: View {
     // Home alert
     @State private var showHomeAlert = false
 
+    // Page-swipe hint + new-page double-swipe window
+    @State private var pageHintText: String?
+    @State private var hintToken = 0
+    @State private var lastEndSwipeDownTime: Date?
+
+    // PDF export / share
+    @State private var showShareSheet = false
+    @State private var sharePDFURL: URL?
+    @State private var showPDFExporter = false
+    @State private var exportDocument: PDFExportDocument?
+
     @EnvironmentObject private var themeManager: ThemeManager
 
+    /// Swatches shown in the color popover. Black leads (it auto-inverts to
+    /// white on a dark page); the rest are vivid hues that read on both
+    /// white and black pages.
     private let presetColors: [Color] = [
-        .black, Color(white: 0.25), Color(white: 0.55),
+        .black,
         Color(red: 0.93, green: 0.19, blue: 0.27),
         Color(red: 1.00, green: 0.58, blue: 0.00),
         Color(red: 0.97, green: 0.84, blue: 0.00),
@@ -67,6 +85,9 @@ struct NotebookEditorView: View {
         VStack(spacing: 0) {
             fileTabBar
 
+            // Pen + undo toolbar now lives at the TOP of the notes area.
+            drawingToolbar
+
             HStack(spacing: 0) {
                 if showPageSidebar {
                     pageSidebar
@@ -81,16 +102,18 @@ struct NotebookEditorView: View {
                         toolType: selectedTool,
                         color: UIColor(selectedColor),
                         lineWidth: currentSize,
+                        isDarkTheme: themeManager.isDark,
                         canvasController: viewModel.canvasController,
                         onErasePage: { showErasePageConfirm = true },
-                        onNextPage: { withAnimation(.easeOut(duration: 0.25)) { viewModel.goToNextPage() } },
-                        onPrevPage: { withAnimation(.easeOut(duration: 0.25)) { viewModel.goToPreviousPage() } },
-                        onNewPage: { withAnimation(.easeOut(duration: 0.25)) { viewModel.addPage() } }
+                        onNextPage: { handleSwipeDownNext() },   // 3-finger down
+                        onPrevPage: { handleSwipeUpPrev() }      // 3-finger up
                     )
                     pageFooter
-                    if !showPageSidebar {
-                        floatingSidebarButton
-                            .transition(.move(edge: .leading).combined(with: .opacity))
+                    if let hint = pageHintText {
+                        pageHintBubble(hint)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                            .allowsHitTesting(false)
+                            .transition(.scale(scale: 0.85).combined(with: .opacity))
                     }
                 }
             }
@@ -99,10 +122,22 @@ struct NotebookEditorView: View {
         .navigationTitle(notebook.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { editorToolbar }
-        .safeAreaInset(edge: .bottom, spacing: 0) { drawingToolbar }
         .onAppear { viewModel.load() }
         .onDisappear { viewModel.saveCurrentDrawing() }
         .sheet(isPresented: $showSyncSheet) { SyncView(notebook: notebook) }
+        // Share the notebook PDF to other apps.
+        .sheet(isPresented: $showShareSheet) {
+            if let url = sharePDFURL { ShareSheet(items: [url]) }
+        }
+        // Download / save the notebook PDF to Files.
+        .fileExporter(
+            isPresented: $showPDFExporter,
+            document: exportDocument,
+            contentType: .pdf,
+            defaultFilename: notebook.title.sanitizedFilename
+        ) { result in
+            if case .failure(let error) = result { viewModel.errorMessage = error.localizedDescription }
+        }
         .onChange(of: pageStylePhotoItem) { _, item in
             guard let item else { return }
             Task {
@@ -137,10 +172,9 @@ struct NotebookEditorView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     Button { showHomeAlert = true } label: {
-                        Image(systemName: "house.fill").font(.system(size: 11.5, weight: .medium))
-                            .foregroundStyle(Color.burgundy)
-                            .padding(.horizontal, 13).padding(.vertical, 7)
-                            .background(Capsule().fill(Color.burgundy.opacity(0.12)))
+                        AssetIcon(asset: "home", systemName: "house.fill", size: 17, fallbackTint: themeManager.iconTint, symbolWeight: .bold)
+                            .padding(.horizontal, 11).padding(.vertical, 6)
+                            .background(Capsule().fill(themeManager.iconTint.opacity(0.14)))
                     }
                     .buttonStyle(.plain)
                     if !openNotebooks.isEmpty {
@@ -190,52 +224,30 @@ struct NotebookEditorView: View {
         .animation(.easeOut(duration: 0.15), value: isActive)
     }
 
-    // MARK: - Floating Sidebar Button
-
-    private var floatingSidebarButton: some View {
-        VStack {
-            Spacer()
-            Button { withAnimation(.easeOut(duration: 0.22)) { showPageSidebar = true } } label: {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.palmLeaf)
-                    .frame(width: 26, height: 52)
-                    .background(.ultraThinMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .strokeBorder(themeManager.border.opacity(0.5), lineWidth: 0.5))
-            }
-            .buttonStyle(.plain)
-            Spacer()
-        }
-        .frame(width: 26)
-    }
-
     // MARK: - Drawing Toolbar
 
     private var drawingToolbar: some View {
         VStack(spacing: 0) {
-            Rectangle().fill(themeManager.border.opacity(0.6)).frame(height: 0.5)
             HStack(spacing: 0) {
-                // Sidebar toggle — active state burgundy, idle icon palmLeaf
+                // Sidebar toggle — active gets a tinted chip, idle is plain.
                 Button { withAnimation(.easeOut(duration: 0.22)) { showPageSidebar.toggle() } } label: {
-                    Image(systemName: showPageSidebar ? "sidebar.squares.left" : "sidebar.left")
-                        .font(.system(size: 16, weight: showPageSidebar ? .semibold : .regular))
-                        .foregroundStyle(showPageSidebar ? Color.burgundy : Color.palmLeaf)
+                    AssetIcon(asset: "page-sidebar", systemName: showPageSidebar ? "sidebar.squares.left" : "sidebar.left", size: 24, fallbackTint: themeManager.iconTint)
                         .frame(width: 44, height: 44)
+                        .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .fill(showPageSidebar ? themeManager.selectionColor.opacity(0.22) : .clear))
                 }
                 .buttonStyle(.plain).padding(.leading, 4)
 
                 toolbarDivider
 
-                // Tool selector
-                HStack(spacing: 2) { ForEach(DrawingToolType.allCases, id: \.self) { toolButton($0) } }
+                // Tool selector — the full pen set
+                HStack(spacing: 1) { ForEach(DrawingToolType.allCases, id: \.self) { toolButton($0) } }
                     .padding(.horizontal, 6)
 
                 toolbarDivider
 
-                // Color (pen/marker/highlight only)
-                if selectedTool != .eraser { colorPickerButton; toolbarDivider }
+                // Color (ink tools only)
+                if selectedTool.isInk { colorPickerButton; toolbarDivider }
 
                 // Size
                 sizeSliderSection
@@ -247,11 +259,11 @@ struct NotebookEditorView: View {
                 // Page style
                 Button { showStylePicker.toggle() } label: {
                     Image(systemName: viewModel.currentPageStyle.systemImage)
-                        .font(.system(size: 15, weight: .medium)).foregroundStyle(Color.palmLeaf)
+                        .font(.system(size: 15, weight: .semibold)).foregroundStyle(themeManager.iconTint)
                         .frame(width: 42, height: 44)
                 }
                 .buttonStyle(.plain)
-                .popover(isPresented: $showStylePicker, arrowEdge: .bottom) { pageStylePopover }
+                .popover(isPresented: $showStylePicker, attachmentAnchor: .rect(.bounds), arrowEdge: .top) { pageStylePopover }
 
                 toolbarDivider
 
@@ -263,7 +275,10 @@ struct NotebookEditorView: View {
                 .padding(.trailing, 4)
             }
             .frame(height: 52)
-            .background(.ultraThinMaterial)
+            .background(themeManager.card)
+
+            // Heavy ink rule under the bar — it sits at the top of the page now.
+            Rectangle().fill(themeManager.outline).frame(height: 2)
         }
     }
 
@@ -272,7 +287,7 @@ struct NotebookEditorView: View {
     private var pageStylePopover: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Page Style")
-                .font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.palmLeaf)
+                .font(.cartoon(14, weight: .heavy)).foregroundStyle(themeManager.iconTint)
             let nonPhotoStyles: [PageStyle] = [.plain, .ruled, .dots, .grid]
             let cols = Array(repeating: GridItem(.flexible(), spacing: 10), count: 2)
             LazyVGrid(columns: cols, spacing: 10) {
@@ -281,24 +296,25 @@ struct NotebookEditorView: View {
             Divider()
             PhotosPicker(selection: $pageStylePhotoItem, matching: .images, photoLibrary: .shared()) {
                 HStack(spacing: 10) {
-                    Image(systemName: "photo").font(.system(size: 15)).foregroundStyle(Color.burgundy)
+                    Image(systemName: "photo").font(.system(size: 15, weight: .semibold)).foregroundStyle(themeManager.iconTint)
                     Text("Import Photo as Background")
-                        .font(.system(size: 13, weight: .medium)).foregroundStyle(Color.burgundy)
+                        .font(.cartoon(13, weight: .semibold)).foregroundStyle(themeManager.iconTint)
                     Spacer()
                     if viewModel.currentPageStyle == .photo {
-                        Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.burgundy)
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(themeManager.iconTint)
                     }
                 }
                 .padding(12)
                 .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.palmLeafDark.opacity(0.12))
+                    .fill(themeManager.selectionColor.opacity(0.18))
                     .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(viewModel.currentPageStyle == .photo ? Color.burgundy.opacity(0.5) : Color.clear, lineWidth: 1.5)))
+                        .strokeBorder(viewModel.currentPageStyle == .photo ? themeManager.selectionColor : Color.clear, lineWidth: 2)))
             }
             .buttonStyle(.plain)
             .onChange(of: pageStylePhotoItem) { _, _ in showStylePicker = false }
         }
         .padding(16).frame(width: 280)
+        .modifier(ForcePopoverAdaptation())
     }
 
     private func styleCard(_ style: PageStyle) -> some View {
@@ -316,11 +332,11 @@ struct NotebookEditorView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
                 .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .strokeBorder(isSelected ? Color.burgundy : themeManager.border,
-                                  lineWidth: isSelected ? 2 : 0.5))
+                    .strokeBorder(isSelected ? themeManager.selectionColor : themeManager.border,
+                                  lineWidth: isSelected ? 2.5 : 0.5))
                 Text(style.label)
                     .font(.system(size: 11.5, weight: isSelected ? .semibold : .regular))
-                    .foregroundStyle(isSelected ? Color.burgundy : themeManager.textSecondary)
+                    .foregroundStyle(isSelected ? themeManager.selectionColor : themeManager.textSecondary)
             }
         }
         .buttonStyle(.plain)
@@ -390,7 +406,7 @@ struct NotebookEditorView: View {
                         case .ruled:
                             let margin: CGFloat = 64
                             ctx.stroke(Path { p in p.move(to: .init(x: margin, y: 0)); p.addLine(to: .init(x: margin, y: size.height)) },
-                                       with: .color(Color.burgundy.opacity(0.3)), lineWidth: 0.6)
+                                       with: .color(themeManager.iconTint.opacity(0.35)), lineWidth: 0.6)
                             var y: CGFloat = spacing
                             while y <= size.height {
                                 ctx.stroke(Path { p in p.move(to: .init(x: 0, y: y)); p.addLine(to: .init(x: size.width, y: y)) },
@@ -438,11 +454,12 @@ struct NotebookEditorView: View {
             Spacer()
             HStack {
                 Spacer()
-                // Current page indicator → burgundy (palette usage rule)
+                // Current page indicator
                 Text("Page \(viewModel.currentPageIndex + 1) of \(viewModel.pages.count)")
-                    .font(.system(size: 12, weight: .medium)).foregroundStyle(Color.burgundy)
-                    .padding(.horizontal, 12).padding(.vertical, 6)
-                    .background(.regularMaterial).clipShape(Capsule())
+                    .font(.cartoon(12, weight: .bold)).foregroundStyle(themeManager.outline)
+                    .padding(.horizontal, 13).padding(.vertical, 7)
+                    .background(Capsule().fill(themeManager.selectionColor))
+                    .overlay(Capsule().strokeBorder(themeManager.outline, lineWidth: 1.5))
                     .padding(16)
             }
         }
@@ -454,21 +471,17 @@ struct NotebookEditorView: View {
     private var pageSidebar: some View {
         VStack(spacing: 0) {
             HStack(spacing: 6) {
-                // Section header → palmLeaf (palette usage rule)
-                Text("Pages")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Color.palmLeaf).textCase(.uppercase).tracking(0.5)
                 Spacer()
                 Button { withAnimation(.easeOut(duration: 0.22)) { showPageSidebar = false } } label: {
-                    Image(systemName: "chevron.left").font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Color.palmLeaf).frame(width: 22, height: 22)
+                    Image(systemName: "chevron.left").font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(themeManager.iconTint).frame(width: 22, height: 22)
                 }
                 .buttonStyle(.plain)
                 Button { viewModel.addPage() } label: {
-                    Image(systemName: "plus").font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Color.burgundy)
+                    Image(systemName: "plus").font(.system(size: 13, weight: .black))
+                        .foregroundStyle(themeManager.iconTint)
                         .frame(width: 24, height: 24)
-                        .background(Color.burgundy.opacity(0.1)).clipShape(Circle())
+                        .background(themeManager.iconTint.opacity(0.14)).clipShape(Circle())
                 }
                 .buttonStyle(.plain)
             }
@@ -519,60 +532,89 @@ struct NotebookEditorView: View {
 
     private func toolButton(_ tool: DrawingToolType) -> some View {
         let isSelected = selectedTool == tool
-        // Active tool → burgundy icon on palmLeafDark selected background;
-        // idle tool icons → palmLeaf (palette usage rules)
-        return Button { withAnimation(.easeOut(duration: 0.15)) { selectedTool = tool } } label: {
-            Image(systemName: tool.systemImage)
-                .font(.system(size: 17, weight: isSelected ? .semibold : .regular))
-                .foregroundStyle(isSelected ? Color.burgundy : Color.palmLeaf)
-                .frame(width: 42, height: 42)
-                .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(isSelected ? Color.palmLeafDark.opacity(0.18) : Color.clear))
+        // One universal icon tint; the selected tool gets a chunky outlined chip.
+        return Button { withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { selectedTool = tool } } label: {
+            toolGlyph(tool, isSelected: isSelected)
+                .frame(width: 40, height: 40)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(isSelected ? themeManager.selectionColor : Color.clear)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(isSelected ? themeManager.outline : Color.clear, lineWidth: 2)
+                )
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(tool.label)
+    }
+
+    /// Uses the downloaded full-color tool artwork when present (always shown in
+    /// full color — no silhouette), otherwise an SF Symbol. The selected tool
+    /// sits on a sage chip, so the SF fallback uses the dark ink color for
+    /// contrast.
+    @ViewBuilder
+    private func toolGlyph(_ tool: DrawingToolType, isSelected: Bool) -> some View {
+        if UIImage(named: tool.assetName) != nil {
+            Image(tool.assetName)
+                .resizable()
+                .renderingMode(.original)
+                .scaledToFit()
+                .frame(width: 24, height: 24)
+        } else {
+            Image(systemName: tool.systemImage)
+                .font(.system(size: 17, weight: isSelected ? .bold : .medium))
+                .foregroundStyle(isSelected ? themeManager.outline : themeManager.iconTint)
+        }
     }
 
     private var colorPickerButton: some View {
         Button { showColorPicker.toggle() } label: {
             ZStack {
-                Circle().fill(selectedColor).frame(width: 24, height: 24).shadow(color: selectedColor.opacity(0.4), radius: 3)
-                Circle().strokeBorder(themeManager.border, lineWidth: 1.5).frame(width: 24, height: 24)
+                Circle().fill(themeManager.hardShadow).frame(width: 26, height: 26).offset(x: 2, y: 2)
+                Circle().fill(selectedColor).frame(width: 26, height: 26)
+                Circle().strokeBorder(themeManager.outline, lineWidth: 2).frame(width: 26, height: 26)
             }
             .frame(width: 46, height: 52)
         }
         .buttonStyle(.plain)
-        .popover(isPresented: $showColorPicker, arrowEdge: .bottom) { colorPopover }
+        .popover(isPresented: $showColorPicker, attachmentAnchor: .rect(.bounds), arrowEdge: .top) { colorPopover }
     }
 
     private var colorPopover: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Color").font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.palmLeaf)
-            let cols = Array(repeating: GridItem(.fixed(34), spacing: 6), count: 6)
-            LazyVGrid(columns: cols, spacing: 6) {
+            Text("Color").font(.cartoon(14, weight: .heavy)).foregroundStyle(themeManager.iconTint)
+            let cols = Array(repeating: GridItem(.fixed(40), spacing: 10), count: 5)
+            LazyVGrid(columns: cols, spacing: 12) {
                 ForEach(presetColors.indices, id: \.self) { i in
-                    Button { selectedColor = presetColors[i]; showColorPicker = false } label: {
+                    Button {
+                        selectedColor = presetColors[i]
+                        showColorPicker = false
+                    } label: {
                         ZStack {
-                            Circle().fill(presetColors[i]).frame(width: 30, height: 30)
-                            Circle().strokeBorder(themeManager.border.opacity(0.5), lineWidth: 1).frame(width: 30, height: 30)
-                        }
-                        .overlay {
+                            Circle().fill(presetColors[i]).frame(width: 34, height: 34)
+                            Circle().strokeBorder(themeManager.outline, lineWidth: 2).frame(width: 34, height: 34)
                             if selectedColor == presetColors[i] {
-                                Circle().strokeBorder(Color.burgundy, lineWidth: 2.5).frame(width: 34, height: 34)
+                                Circle().strokeBorder(themeManager.selectionColor, lineWidth: 3).frame(width: 40, height: 40)
                             }
                         }
-                        .frame(width: 34, height: 34)
+                        .frame(width: 40, height: 40)
                     }
                     .buttonStyle(.plain)
                 }
             }
             Divider()
-            HStack {
-                Text("Custom").font(.system(size: 13)).foregroundStyle(themeManager.textSecondary)
-                Spacer()
-                ColorPicker("", selection: $selectedColor, supportsOpacity: false).labelsHidden().frame(width: 36, height: 36)
+            // Full system color palette (wheel / sliders / grid).
+            ColorPicker(selection: $selectedColor, supportsOpacity: false) {
+                HStack(spacing: 8) {
+                    Image(systemName: "paintpalette.fill").foregroundStyle(themeManager.iconTint)
+                    Text("More Colors").font(.cartoon(14, weight: .bold)).foregroundStyle(themeManager.textPrimary)
+                }
             }
         }
-        .padding(16).frame(width: 248)
+        .padding(16)
+        .frame(width: 268)
+        .modifier(ForcePopoverAdaptation())
     }
 
     private var sizeSliderSection: some View {
@@ -582,7 +624,7 @@ struct NotebookEditorView: View {
                 value: Binding(get: { toolSizes[selectedTool] ?? selectedTool.defaultSize }, set: { toolSizes[selectedTool] = $0 }),
                 in: selectedTool.sizeRange
             )
-            .frame(width: 110).tint(Color.burgundy)
+            .frame(width: 110).tint(themeManager.iconTint)
             Image(systemName: "circle.fill").font(.system(size: 12)).foregroundStyle(themeManager.textSecondary.opacity(0.5))
         }
         .padding(.horizontal, 10)
@@ -594,8 +636,8 @@ struct NotebookEditorView: View {
 
     private func toolbarActionButton(icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: icon).font(.system(size: 16, weight: .medium))
-                .foregroundStyle(Color.palmLeaf).frame(width: 42, height: 44)
+            Image(systemName: icon).font(.system(size: 16, weight: .bold))
+                .foregroundStyle(themeManager.iconTint).frame(width: 42, height: 44)
         }
         .buttonStyle(.plain)
     }
@@ -604,18 +646,127 @@ struct NotebookEditorView: View {
 
     @ToolbarContentBuilder
     private var editorToolbar: some ToolbarContent {
+        // Books (notebook list) sidebar toggle.
+        ToolbarItem(placement: .navigationBarLeading) {
+            Button { onToggleBooksSidebar() } label: {
+                AssetIcon(asset: "book-sidebar", systemName: "sidebar.left", size: 22, fallbackTint: themeManager.iconTint)
+            }
+        }
         ToolbarItemGroup(placement: .navigationBarTrailing) {
+            // Scale / ruler
             Button { viewModel.isRulerActive.toggle() } label: {
-                Image(systemName: "ruler").symbolVariant(viewModel.isRulerActive ? .fill : .none)
-                    .foregroundStyle(viewModel.isRulerActive ? Color.burgundy : Color.palmLeaf)
+                AssetIcon(asset: "scale", systemName: viewModel.isRulerActive ? "ruler.fill" : "ruler", size: 22, fallbackTint: themeManager.iconTint)
             }
-            // Sync button → pineTeal (palette usage rule)
+            // Download PDF (save to Files)
+            Button { downloadPDF() } label: {
+                AssetIcon(asset: "download", systemName: "arrow.down.circle", size: 22, fallbackTint: themeManager.iconTint)
+            }
+            // Share PDF (to other apps)
+            Button { sharePDF() } label: {
+                AssetIcon(asset: "share", systemName: "square.and.arrow.up", size: 22, fallbackTint: themeManager.iconTint)
+            }
+            // Sync
             Button { showSyncSheet = true } label: {
-                Image(systemName: "icloud.and.arrow.up").foregroundStyle(Color.pineTeal)
+                AssetIcon(asset: "cloud-sync", systemName: "icloud.and.arrow.up", size: 22, fallbackTint: themeManager.iconTint)
             }
-            Button { onCloseNotebook(notebook); onGoHome() } label: {
-                Image(systemName: "xmark.circle").font(.system(size: 16)).foregroundStyle(Color.palmLeaf)
+        }
+    }
+
+    // MARK: - Page Swipe Navigation
+
+    /// 3-finger swipe up → previous page (grey hint at the first page).
+    private func handleSwipeUpPrev() {
+        lastEndSwipeDownTime = nil
+        if viewModel.currentPageIndex <= 0 {
+            showPageHint("This is the first page")
+        } else {
+            withAnimation(.easeOut(duration: 0.25)) { viewModel.goToPreviousPage() }
+        }
+    }
+
+    /// 3-finger swipe down → next page. On the last page, a second down-swipe
+    /// within 5 seconds creates a new page.
+    private func handleSwipeDownNext() {
+        if viewModel.currentPageIndex < viewModel.pages.count - 1 {
+            lastEndSwipeDownTime = nil
+            withAnimation(.easeOut(duration: 0.25)) { viewModel.goToNextPage() }
+        } else {
+            let now = Date()
+            if let last = lastEndSwipeDownTime, now.timeIntervalSince(last) <= 5 {
+                lastEndSwipeDownTime = nil
+                withAnimation(.easeOut(duration: 0.25)) { viewModel.addPage() }
+                showPageHint("New page added")
+            } else {
+                lastEndSwipeDownTime = now
+                showPageHint("Swipe down again to add a page")
             }
+        }
+    }
+
+    /// Shows a small grey hint bubble that auto-dismisses.
+    private func showPageHint(_ text: String) {
+        hintToken += 1
+        let token = hintToken
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { pageHintText = text }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.7) {
+            if hintToken == token {
+                withAnimation(.easeOut(duration: 0.2)) { pageHintText = nil }
+            }
+        }
+    }
+
+    private func pageHintBubble(_ text: String) -> some View {
+        Text(text)
+            .font(.cartoon(13, weight: .bold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 11)
+            .background(Capsule().fill(Color(white: 0.32)))   // grey background
+            .overlay(Capsule().strokeBorder(themeManager.outline.opacity(0.4), lineWidth: 1.5))
+            .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
+    }
+
+    // MARK: - PDF Export
+
+    /// Saves the current page, then renders the whole notebook to a temp PDF.
+    private func makeNotebookPDF() -> URL? {
+        viewModel.saveCurrentDrawing()
+        // The PKCanvasView bounds are the coordinate space the strokes live in —
+        // pass them so the PDF scales the drawing to fill the page correctly.
+        let canvasSize = viewModel.canvasController.canvasView?.bounds.size
+        do {
+            return try PDFGenerator.shared.generatePDF(for: notebook, canvasSize: canvasSize)
+        } catch {
+            viewModel.errorMessage = error.localizedDescription
+            return nil
+        }
+    }
+
+    private func downloadPDF() {
+        guard let url = makeNotebookPDF(), let data = try? Data(contentsOf: url) else { return }
+        exportDocument = PDFExportDocument(data: data)
+        showPDFExporter = true
+    }
+
+    private func sharePDF() {
+        guard let url = makeNotebookPDF() else { return }
+        sharePDFURL = url
+        showShareSheet = true
+    }
+}
+
+// MARK: - Popover Adaptation
+//
+// Keeps popovers as floating popovers (instead of expanding to a full sheet on
+// compact widths), so the color / page-style pickers always drop down from the
+// toolbar and show their full content.
+
+private struct ForcePopoverAdaptation: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 16.4, *) {
+            content.presentationCompactAdaptation(.popover)
+        } else {
+            content
         }
     }
 }
@@ -646,8 +797,8 @@ struct PageThumbnailView: View {
                         .frame(width: 76, height: 96)
                         .overlay(
                             RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                .strokeBorder(isSelected ? Color.burgundy : themeManager.border,
-                                              lineWidth: isSelected ? 1.5 : 0.5)
+                                .strokeBorder(isSelected ? themeManager.selectionColor : themeManager.border,
+                                              lineWidth: isSelected ? 2.5 : 0.5)
                         )
                         .shadow(color: .black.opacity(0.06), radius: 4, x: 0, y: 2)
 
@@ -685,8 +836,8 @@ struct PageThumbnailView: View {
                 }
 
                 Text("\(pageNumber)")
-                    .font(.system(size: 10, weight: isSelected ? .semibold : .regular))
-                    .foregroundStyle(isSelected ? Color.burgundy : themeManager.textSecondary)
+                    .font(.system(size: 10, weight: isSelected ? .bold : .regular))
+                    .foregroundStyle(isSelected ? themeManager.selectionColor : themeManager.textSecondary)
             }
         }
         .buttonStyle(.plain)

@@ -70,7 +70,6 @@ struct NotebookCreationSheet: View {
                 }
             }
         }
-        .themeToggleOverlay()
         .presentationDetents([.large])
     }
 

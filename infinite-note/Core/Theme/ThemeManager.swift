@@ -64,10 +64,22 @@ enum AppTheme: String, CaseIterable {
     }
 
     /// Color of the hard, blur-free drop shadow that gives elements their
-    /// "sticker" lift. Tinted toward the outline so it reads as a bold edge.
+    /// "sticker" lift. Solid black on both themes — the dark background is a
+    /// slate (not pure black) precisely so this shadow stays visible.
     var hardShadow: Color {
-        self == .dark ? Color.black.opacity(0.55) : Color.inkOutlineLight.opacity(0.9)
+        self == .dark ? Color.black.opacity(0.9) : Color.inkOutlineLight.opacity(0.9)
     }
+
+    /// One universal icon tint that pops on both cream and slate backgrounds.
+    /// Deliberately avoids red/green — a friendly indigo-violet that reads
+    /// clearly in either theme.
+    var iconTint: Color {
+        self == .dark ? Color(hex: "9B8CFF") : Color(hex: "6354E0")
+    }
+
+    /// Highlight color for selected states (selected tool chip, chosen page
+    /// style, color ring, current page) — a calm sage.
+    var selectionColor: Color { Color(hex: "A4B494") }
 }
 
 // MARK: - Theme Manager
@@ -112,4 +124,6 @@ final class ThemeManager: ObservableObject {
     var grid: Color          { theme.grid }
     var outline: Color       { theme.outline }
     var hardShadow: Color    { theme.hardShadow }
+    var iconTint: Color      { theme.iconTint }
+    var selectionColor: Color { theme.selectionColor }
 }
