@@ -64,10 +64,10 @@ enum AppTheme: String, CaseIterable {
     }
 
     /// Color of the hard, blur-free drop shadow that gives elements their
-    /// "sticker" lift. Solid black on both themes — the dark background is a
-    /// slate (not pure black) precisely so this shadow stays visible.
+    /// "sticker" lift. Near-black ink on light theme; WHITE on dark theme —
+    /// a black shadow would vanish against the black background.
     var hardShadow: Color {
-        self == .dark ? Color.black.opacity(0.9) : Color.inkOutlineLight.opacity(0.9)
+        self == .dark ? Color.white.opacity(0.9) : Color.inkOutlineLight.opacity(0.9)
     }
 
     /// One universal icon tint that pops on both cream and slate backgrounds.

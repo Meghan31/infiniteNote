@@ -256,8 +256,8 @@ struct DrawingCanvasView: UIViewRepresentable {
     var isDarkTheme: Bool = false
     var canvasController: CanvasController
     var onErasePage: () -> Void
-    var onNextPage:  () -> Void = {}   // 3-finger swipe down
-    var onPrevPage:  () -> Void = {}   // 3-finger swipe up
+    var onNextPage:  () -> Void = {}   // 3-finger swipe up
+    var onPrevPage:  () -> Void = {}   // 3-finger swipe down
 
     func makeUIView(context: Context) -> ManagedCanvasView {
         let canvas = ManagedCanvasView()
@@ -320,21 +320,21 @@ struct DrawingCanvasView: UIViewRepresentable {
         erase.cancelsTouchesInView    = false
         canvas.addGestureRecognizer(erase)
 
-        // ── Previous page: 3-finger swipe up ────────────────────────────
-        let prevPage = UISwipeGestureRecognizer(
-            target: coord, action: #selector(Coordinator.handleSwipeUp))
-        prevPage.numberOfTouchesRequired = 3
-        prevPage.direction               = .up
-        prevPage.cancelsTouchesInView    = false
-        canvas.addGestureRecognizer(prevPage)
-
-        // ── Next page / new page: 3-finger swipe down ───────────────────
+        // ── Next page / new page: 3-finger swipe up ─────────────────────
         let nextPage = UISwipeGestureRecognizer(
-            target: coord, action: #selector(Coordinator.handleSwipeDown))
+            target: coord, action: #selector(Coordinator.handleSwipeUp))
         nextPage.numberOfTouchesRequired = 3
-        nextPage.direction               = .down
+        nextPage.direction               = .up
         nextPage.cancelsTouchesInView    = false
         canvas.addGestureRecognizer(nextPage)
+
+        // ── Previous page: 3-finger swipe down ──────────────────────────
+        let prevPage = UISwipeGestureRecognizer(
+            target: coord, action: #selector(Coordinator.handleSwipeDown))
+        prevPage.numberOfTouchesRequired = 3
+        prevPage.direction               = .down
+        prevPage.cancelsTouchesInView    = false
+        canvas.addGestureRecognizer(prevPage)
 
         // Patch any PencilKit single-tap GRs that were already on the canvas.
         for gr in preExisting {
@@ -470,7 +470,7 @@ struct DrawingCanvasView: UIViewRepresentable {
             parent.onErasePage()
         }
 
-        @objc func handleSwipeUp()   { parent.onPrevPage() }   // 3-finger up → previous
-        @objc func handleSwipeDown() { parent.onNextPage() }   // 3-finger down → next / new
+        @objc func handleSwipeUp()   { parent.onNextPage() }   // 3-finger up → next / new
+        @objc func handleSwipeDown() { parent.onPrevPage() }   // 3-finger down → previous
     }
 }

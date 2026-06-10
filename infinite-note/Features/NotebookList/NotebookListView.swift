@@ -24,7 +24,12 @@ struct NotebookListView: View {
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
-            sidebar.navigationSplitViewColumnWidth(min: 280, ideal: 380, max: 480)
+            sidebar
+                // Must be applied to the SIDEBAR column content — this is what
+                // actually removes the system sidebar toggle (the blue icon).
+                // Our custom book-sidebar button replaces it.
+                .toolbar(removing: .sidebarToggle)
+                .navigationSplitViewColumnWidth(min: 280, ideal: 380, max: 480)
         } detail: {
             if let notebook = selectedNotebook {
                 NotebookEditorView(

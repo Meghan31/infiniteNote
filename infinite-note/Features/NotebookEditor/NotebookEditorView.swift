@@ -38,7 +38,7 @@ struct NotebookEditorView: View {
     // Page-swipe hint + new-page double-swipe window
     @State private var pageHintText: String?
     @State private var hintToken = 0
-    @State private var lastEndSwipeDownTime: Date?
+    @State private var lastEndSwipeUpTime: Date?
 
     // PDF export / share
     @State private var showShareSheet = false
@@ -114,8 +114,8 @@ struct NotebookEditorView: View {
                         isDarkTheme: themeManager.isDark,
                         canvasController: viewModel.canvasController,
                         onErasePage: { showErasePageConfirm = true },
-                        onNextPage: { handleSwipeDownNext() },   // 3-finger down
-                        onPrevPage: { handleSwipeUpPrev() }      // 3-finger up
+                        onNextPage: { handleSwipeUpNext() },     // 3-finger up
+                        onPrevPage: { handleSwipeDownPrev() }    // 3-finger down
                     )
                     pageFooter
                     if let hint = pageHintText {
@@ -185,7 +185,7 @@ struct NotebookEditorView: View {
                 HStack(spacing: 6) {
                     Button { showHomeAlert = true } label: {
                         AssetIcon(
-                            asset: "home",
+                            asset: themeManager.isDark ? "home-white" : "home",
                             systemName: "house.fill",
                             size: 30,
                             fallbackTint: themeManager.iconTint,
@@ -251,7 +251,7 @@ struct NotebookEditorView: View {
                 // Sidebar toggle.
                 Button { withAnimation(.easeOut(duration: 0.22)) { showPageSidebar.toggle() } } label: {
                     AssetIcon(
-                        asset: "page-sidebar",
+                        asset: themeManager.isDark ? "page-sidebar-white" : "page-sidebar",
                         systemName: showPageSidebar ? "sidebar.squares.left" : "sidebar.left",
                         size: 35,
                         fallbackTint: themeManager.iconTint,
@@ -857,9 +857,9 @@ struct NotebookEditorView: View {
 
     // MARK: - Page Swipe Navigation
 
-    /// 3-finger swipe up → previous page (grey hint at the first page).
-    private func handleSwipeUpPrev() {
-        lastEndSwipeDownTime = nil
+    /// 3-finger swipe down → previous page (grey hint at the first page).
+    private func handleSwipeDownPrev() {
+        lastEndSwipeUpTime = nil
         if viewModel.currentPageIndex <= 0 {
             showPageHint("This is the first page")
         } else {
@@ -867,21 +867,21 @@ struct NotebookEditorView: View {
         }
     }
 
-    /// 3-finger swipe down → next page. On the last page, a second down-swipe
+    /// 3-finger swipe up → next page. On the last page, a second up-swipe
     /// within 5 seconds creates a new page.
-    private func handleSwipeDownNext() {
+    private func handleSwipeUpNext() {
         if viewModel.currentPageIndex < viewModel.pages.count - 1 {
-            lastEndSwipeDownTime = nil
+            lastEndSwipeUpTime = nil
             withAnimation(.easeOut(duration: 0.25)) { viewModel.goToNextPage() }
         } else {
             let now = Date()
-            if let last = lastEndSwipeDownTime, now.timeIntervalSince(last) <= 5 {
-                lastEndSwipeDownTime = nil
+            if let last = lastEndSwipeUpTime, now.timeIntervalSince(last) <= 5 {
+                lastEndSwipeUpTime = nil
                 withAnimation(.easeOut(duration: 0.25)) { viewModel.addPage() }
                 showPageHint("New page added")
             } else {
-                lastEndSwipeDownTime = now
-                showPageHint("Swipe down again to add a page")
+                lastEndSwipeUpTime = now
+                showPageHint("Swipe up again to add a page")
             }
         }
     }
