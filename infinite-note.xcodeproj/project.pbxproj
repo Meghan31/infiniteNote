@@ -6,6 +6,11 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		76D7FB9B2FCE9AAA0059D699 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 76D7FB9A2FCE9AAA0059D699 /* GRDB */; };
+		76D7FB9D2FCE9AAA0059D699 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = 76D7FB9C2FCE9AAA0059D699 /* Supabase */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		76D7FAFD2FCE936E0059D699 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -27,6 +32,9 @@
 		76D7FAEF2FCE936D0059D699 /* infinite-note.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "infinite-note.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		76D7FAFC2FCE936E0059D699 /* infinite-noteTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "infinite-noteTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		76D7FB062FCE936E0059D699 /* infinite-noteUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "infinite-noteUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		76D7FB592FCE95220059D699 /* prd.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = prd.md; sourceTree = "<group>"; };
+		76D7FB5B2FCE95380059D699 /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
+		76D7FD532FCEA7730059D699 /* done-not_done.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "done-not_done.md"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -52,6 +60,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				76D7FB9B2FCE9AAA0059D699 /* GRDB in Frameworks */,
+				76D7FB9D2FCE9AAA0059D699 /* Supabase in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -75,6 +85,9 @@
 		76D7FAE62FCE936D0059D699 = {
 			isa = PBXGroup;
 			children = (
+				76D7FD532FCEA7730059D699 /* done-not_done.md */,
+				76D7FB5B2FCE95380059D699 /* .gitignore */,
+				76D7FB592FCE95220059D699 /* prd.md */,
 				76D7FAF12FCE936D0059D699 /* infinite-note */,
 				76D7FAFF2FCE936E0059D699 /* infinite-noteTests */,
 				76D7FB092FCE936E0059D699 /* infinite-noteUITests */,
@@ -112,6 +125,8 @@
 			);
 			name = "infinite-note";
 			packageProductDependencies = (
+				76D7FB9A2FCE9AAA0059D699 /* GRDB */,
+				76D7FB9C2FCE9AAA0059D699 /* Supabase */,
 			);
 			productName = "infinite-note";
 			productReference = 76D7FAEF2FCE936D0059D699 /* infinite-note.app */;
@@ -195,6 +210,10 @@
 			);
 			mainGroup = 76D7FAE62FCE936D0059D699;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				76D7FB892FCE97E10059D699 /* XCRemoteSwiftPackageReference "GRDB" */,
+				76D7FB8A2FCE980A0059D699 /* XCRemoteSwiftPackageReference "supabase-swift" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 76D7FAF02FCE936D0059D699 /* Products */;
 			projectDirPath = "";
@@ -395,6 +414,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = XHMXGLBHS3;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -422,6 +442,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = XHMXGLBHS3;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -550,6 +571,38 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		76D7FB892FCE97E10059D699 /* XCRemoteSwiftPackageReference "GRDB" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/groue/GRDB.swift";
+			requirement = {
+				branch = master;
+				kind = branch;
+			};
+		};
+		76D7FB8A2FCE980A0059D699 /* XCRemoteSwiftPackageReference "supabase-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/supabase-community/supabase-swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.5.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		76D7FB9A2FCE9AAA0059D699 /* GRDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 76D7FB892FCE97E10059D699 /* XCRemoteSwiftPackageReference "GRDB" */;
+			productName = GRDB;
+		};
+		76D7FB9C2FCE9AAA0059D699 /* Supabase */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 76D7FB8A2FCE980A0059D699 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Supabase;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 76D7FAE72FCE936D0059D699 /* Project object */;
 }

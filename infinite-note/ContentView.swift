@@ -2,23 +2,22 @@
 //  ContentView.swift
 //  infinite-note
 //
-//  Created by Meghasrivardhan Pulakhandam on 6/1/26.
-//
 
 import SwiftUI
 
 struct ContentView: View {
+    @EnvironmentObject private var themeManager: ThemeManager
+
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
-        }
-        .padding()
+        NotebookListView()
+            .background(themeManager.background.ignoresSafeArea())
+            // Floating ☀/🌙 toggle — ZStack overlay above home & editor.
+            // Sheets apply the same overlay to stay covered in modals.
+            .themeToggleOverlay()
     }
 }
 
 #Preview {
     ContentView()
+        .environmentObject(ThemeManager.shared)
 }
