@@ -304,7 +304,7 @@ struct NotebookListView: View {
         .navigationBarBackButtonHidden(true)
         .toolbar {
             ToolbarItemGroup(placement: .navigationBarLeading) {
-                Button { toggleBooksSidebar() } label: {
+                JigglingIconButton(duration: 0.2, action: { toggleBooksSidebar() }) {
                     AssetIcon(
                         asset: "book-sidebar",
                         systemName: "sidebar.left",

@@ -85,7 +85,6 @@ struct SyncView: View {
                 }
             }
         }
-        .themeToggleOverlay()
         .presentationDetents([.medium])
         .presentationDragIndicator(.visible)
         .task { await sync() }

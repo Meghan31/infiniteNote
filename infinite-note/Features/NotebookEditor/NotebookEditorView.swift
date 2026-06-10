@@ -14,6 +14,7 @@ struct NotebookEditorView: View {
 
     @State private var viewModel: NotebookEditorViewModel
     @State private var showSyncSheet = false
+    @State private var showSyncConfirm = false
     @State private var showPageSidebar = true
     /// Read-only mode: drawing/editing disabled; pages turn with 3-finger
     /// horizontal swipes; the toolbar collapses to just the read-mode icon.
@@ -45,8 +46,10 @@ struct NotebookEditorView: View {
     @State private var lastEndSwipeUpTime: Date?
 
     // PDF export / share
-    @State private var showShareSheet = false
-    @State private var sharePDFURL: URL?
+    /// Drives the share popup via `.sheet(item:)` so the PDF URL is always
+    /// present when the sheet renders (a Bool + optional URL raced on first
+    /// open and showed an empty white sheet in light mode).
+    @State private var sharePDFItem: SharePDFItem?
     @State private var showPDFExporter = false
     @State private var exportDocument: PDFExportDocument?
 
@@ -150,9 +153,9 @@ struct NotebookEditorView: View {
                 onSynced: onSynced
             )
         }
-        // Share the notebook PDF to other apps.
-        .sheet(isPresented: $showShareSheet) {
-            if let url = sharePDFURL { ShareSheet(items: [url]) }
+        // Share the notebook PDF — themed popup with share + save actions.
+        .sheet(item: $sharePDFItem) { item in
+            SharePDFView(notebook: notebook, pdfURL: item.url)
         }
         // Download / save the notebook PDF to Files.
         .fileExporter(
@@ -180,6 +183,12 @@ struct NotebookEditorView: View {
             Button("Close All", role: .destructive) { onGoHome() }
             Button("Cancel", role: .cancel) { }
         } message: { Text("Going home will close all open files.") }
+        .alert("Sync notebook?", isPresented: $showSyncConfirm) {
+            Button("Yes") { confirmSyncNotebook() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Upload a PDF snapshot of this notebook to Supabase?")
+        }
         .alert("Error", isPresented: Binding(
             get: { viewModel.errorMessage != nil },
             set: { if !$0 { viewModel.errorMessage = nil } }
@@ -196,7 +205,7 @@ struct NotebookEditorView: View {
             Rectangle().fill(themeManager.border.opacity(0.6)).frame(height: 0.5).frame(maxHeight: .infinity, alignment: .bottom)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
-                    Button { showHomeAlert = true } label: {
+                    JigglingIconButton(duration: 0.2, action: { showHomeAlert = true }) {
                         AssetIcon(
                             asset: themeManager.isDark ? "home-white" : "home",
                             systemName: "house.fill",
@@ -282,7 +291,9 @@ struct NotebookEditorView: View {
     private var editingToolbarRow: some View {
         HStack(spacing: 0) {
                 // Sidebar toggle.
-                Button { withAnimation(.easeOut(duration: 0.22)) { showPageSidebar.toggle() } } label: {
+                JigglingIconButton(duration: 0.2, action: {
+                    withAnimation(.easeOut(duration: 0.22)) { showPageSidebar.toggle() }
+                }) {
                     AssetIcon(
                         asset: themeManager.isDark ? "page-sidebar-white" : "page-sidebar",
                         systemName: showPageSidebar ? "sidebar.squares.left" : "sidebar.left",
@@ -717,23 +728,19 @@ struct NotebookEditorView: View {
 
     private var exportActionsCapsule: some View {
         HStack(spacing: 2) {
-            Button { downloadPDF() } label: {
+            JigglingIconButton(action: { downloadPDF() }) {
                 capsuleActionIcon(asset: themedActionAsset("download"), systemName: "arrow.down.circle", size: 32)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Download PDF")
 
-            Button { sharePDF() } label: {
+            JigglingIconButton(action: { sharePDF() }) {
                 capsuleActionIcon(asset: themedActionAsset("share"), systemName: "square.and.arrow.up", size: 32)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Share PDF")
 
-            Button {
-                // Persist in-flight strokes so the synced PDF is current.
-                viewModel.saveCurrentDrawing()
-                showSyncSheet = true
-            } label: {
+            JigglingIconButton(action: { showSyncConfirm = true }) {
                 capsuleActionIcon(asset: themedActionAsset("sync"), systemName: "icloud.and.arrow.up", size: 33)
             }
             .buttonStyle(.plain)
@@ -865,7 +872,7 @@ struct NotebookEditorView: View {
     private var editorToolbar: some ToolbarContent {
         // Books (notebook list) sidebar toggle + theme switch.
         ToolbarItemGroup(placement: .navigationBarLeading) {
-            Button { onToggleBooksSidebar() } label: {
+            JigglingIconButton(duration: 0.2, action: { onToggleBooksSidebar() }) {
                 AssetIcon(
                     asset: "book-sidebar",
                     systemName: "sidebar.left",
@@ -883,7 +890,7 @@ struct NotebookEditorView: View {
         }
         ToolbarItemGroup(placement: .navigationBarTrailing) {
             // Scale / ruler
-            Button { viewModel.isRulerActive.toggle() } label: {
+            JigglingIconButton(duration: 0.2, action: { viewModel.isRulerActive.toggle() }) {
                 AssetIcon(
                     asset: "scale",
                     systemName: viewModel.isRulerActive ? "ruler.fill" : "ruler",
@@ -955,6 +962,11 @@ struct NotebookEditorView: View {
             .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
     }
 
+    private func confirmSyncNotebook() {
+        viewModel.saveCurrentDrawing()
+        showSyncSheet = true
+    }
+
     // MARK: - PDF Export
 
     /// Saves the current page, then renders the whole notebook to a temp PDF.
@@ -979,8 +991,7 @@ struct NotebookEditorView: View {
 
     private func sharePDF() {
         guard let url = makeNotebookPDF() else { return }
-        sharePDFURL = url
-        showShareSheet = true
+        sharePDFItem = SharePDFItem(url: url)
     }
 }
 
