@@ -116,7 +116,13 @@ struct SyncView: View {
     private var statusIcon: some View {
         switch syncState {
         case .syncing:
-            AssetIcon(asset: "cloud-sync", systemName: "icloud.and.arrow.up", size: 60, fallbackTint: iconForeground)
+            AssetIcon(
+                asset: themeManager.isDark ? "sync-dark" : "sync-light",
+                systemName: "icloud.and.arrow.up",
+                size: 60,
+                fallbackTint: iconForeground,
+                addsDepth: false
+            )
         case .success:
             Image(systemName: "checkmark.icloud.fill")
                 .font(.system(size: 38, weight: .medium))

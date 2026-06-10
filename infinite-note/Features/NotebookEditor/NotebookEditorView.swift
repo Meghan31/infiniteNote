@@ -718,13 +718,13 @@ struct NotebookEditorView: View {
     private var exportActionsCapsule: some View {
         HStack(spacing: 2) {
             Button { downloadPDF() } label: {
-                capsuleActionIcon(asset: "download", systemName: "arrow.down.circle", size: 32)
+                capsuleActionIcon(asset: themedActionAsset("download"), systemName: "arrow.down.circle", size: 32)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Download PDF")
 
             Button { sharePDF() } label: {
-                capsuleActionIcon(asset: "share", systemName: "square.and.arrow.up", size: 32)
+                capsuleActionIcon(asset: themedActionAsset("share"), systemName: "square.and.arrow.up", size: 32)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Share PDF")
@@ -734,44 +734,24 @@ struct NotebookEditorView: View {
                 viewModel.saveCurrentDrawing()
                 showSyncSheet = true
             } label: {
-                capsuleActionIcon(asset: "cloud-sync", systemName: "icloud.and.arrow.up", size: 33)
+                capsuleActionIcon(asset: themedActionAsset("sync"), systemName: "icloud.and.arrow.up", size: 33)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Sync notebook")
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
-        .background(
-            Capsule(style: .continuous)
-                .fill(themeManager.selectionColor.opacity(themeManager.isDark ? 0.44 : 0.34))
-                .overlay(
-                    Capsule(style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    Color.white.opacity(themeManager.isDark ? 0.18 : 0.72),
-                                    Color.clear,
-                                    Color.black.opacity(themeManager.isDark ? 0.26 : 0.10)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                )
-        )
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
         .overlay(
             Capsule(style: .continuous)
                 .strokeBorder(
-                    Color.white.opacity(themeManager.isDark ? 0.16 : 0.48),
-                    lineWidth: 1
+                    themeManager.outline.opacity(themeManager.isDark ? 0.5 : 0.26),
+                    lineWidth: 1.25
                 )
         )
-        .background(
-            Capsule(style: .continuous)
-                .fill(themeManager.hardShadow.opacity(themeManager.isDark ? 0.62 : 0.28))
-                .offset(x: 3.4, y: 4)
-        )
-        .shadow(color: .black.opacity(themeManager.isDark ? 0.32 : 0.14), radius: 5, x: 1.2, y: 3)
+    }
+
+    private func themedActionAsset(_ name: String) -> String {
+        "\(name)-\(themeManager.isDark ? "dark" : "light")"
     }
 
     private func capsuleActionIcon(asset: String, systemName: String, size: CGFloat) -> some View {
@@ -779,7 +759,8 @@ struct NotebookEditorView: View {
             asset: asset,
             systemName: systemName,
             size: size,
-            fallbackTint: themeManager.iconTint
+            fallbackTint: themeManager.iconTint,
+            addsDepth: false
         )
         .frame(width: 38, height: 38)
         .contentShape(Circle())
