@@ -15,11 +15,32 @@ struct NotebookListView: View {
     @State private var notebookToEditCover: Notebook?
     @State private var searchText = ""
 
+    // Folders (homepage)
+    @State private var selectedFolder: Folder?
+    @State private var showCreateFolderSheet = false
+    @State private var folderToEdit: Folder?
+    @State private var folderToDelete: Folder?
+
     private let columns = [GridItem(.adaptive(minimum: 160, maximum: 220), spacing: 22)]
 
     private var filteredNotebooks: [Notebook] {
         guard !searchText.isEmpty else { return viewModel.notebooks }
         return viewModel.notebooks.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
+    }
+
+    /// Folders matching the sidebar search (by name or author).
+    private var filteredFolders: [Folder] {
+        guard !searchText.isEmpty else { return [] }
+        return viewModel.folders.filter {
+            $0.name.localizedCaseInsensitiveContains(searchText)
+                || ($0.author?.localizedCaseInsensitiveContains(searchText) ?? false)
+        }
+    }
+
+    /// Live copy of the selected folder (reflects renames/edits instantly).
+    private var liveSelectedFolder: Folder? {
+        guard let folder = selectedFolder else { return nil }
+        return viewModel.folders.first { $0.id == folder.id } ?? folder
     }
 
     var body: some View {
@@ -53,7 +74,8 @@ struct NotebookListView: View {
                             selectedNotebook = nil
                         }
                     },
-                    onToggleBooksSidebar: { toggleBooksSidebar() }
+                    onToggleBooksSidebar: { toggleBooksSidebar() },
+                    onSynced: { date in viewModel.applySyncDate(date, to: notebook) }
                 )
                 .id(notebook.id)
             } else {
@@ -80,6 +102,44 @@ struct NotebookListView: View {
                 showCreateSheet = false
             }
         }
+        // Create folder sheet
+        .sheet(isPresented: $showCreateFolderSheet) {
+            FolderCreationSheet { name, colorIndex, imageData, author in
+                withAnimation(.easeOut(duration: 0.2)) {
+                    viewModel.createFolder(name: name, colorIndex: colorIndex, imageData: imageData, author: author)
+                }
+                showCreateFolderSheet = false
+            } onCancel: {
+                showCreateFolderSheet = false
+            }
+        }
+        // Edit folder sheet
+        .sheet(item: $folderToEdit) { folder in
+            FolderCreationSheet(folder: folder) { name, colorIndex, imageData, author in
+                viewModel.updateFolder(folder, name: name, colorIndex: colorIndex, imageData: imageData, author: author)
+                folderToEdit = nil
+            } onCancel: {
+                folderToEdit = nil
+            }
+        }
+        // Delete folder alert
+        .alert("Delete Folder", isPresented: Binding(
+            get: { folderToDelete != nil },
+            set: { if !$0 { folderToDelete = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { folderToDelete = nil }
+            Button("Delete", role: .destructive) {
+                if let folder = folderToDelete {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        if selectedFolder?.id == folder.id { selectedFolder = nil }
+                        viewModel.deleteFolder(folder)
+                    }
+                    folderToDelete = nil
+                }
+            }
+        } message: {
+            Text("\"\(folderToDelete?.name ?? "")\" will be deleted. The notebooks inside stay in your library.")
+        }
         // Edit cover sheet
         .sheet(item: $notebookToEditCover) { nb in
             EditCoverSheet(
@@ -92,23 +152,50 @@ struct NotebookListView: View {
         }
         // Rename sheet
         .sheet(item: $notebookToRename) { renameSheet($0) }
-        // Delete alert
-        .alert("Delete Notebook", isPresented: Binding(
-            get: { notebookToDelete != nil },
-            set: { if !$0 { notebookToDelete = nil } }
-        )) {
-            Button("Cancel", role: .cancel) { notebookToDelete = nil }
-            Button("Delete", role: .destructive) {
-                if let nb = notebookToDelete {
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        openNotebooks.removeAll { $0.id == nb.id }
-                        if selectedNotebook?.id == nb.id { selectedNotebook = nil }
+        // Delete flow — options depend on whether the notebook is synced.
+        .confirmationDialog(
+            "Delete \"\(notebookToDelete?.title ?? "")\"?",
+            isPresented: Binding(
+                get: { notebookToDelete != nil },
+                set: { if !$0 { notebookToDelete = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let nb = notebookToDelete {
+                if nb.lastSyncedAt != nil {
+                    // Synced → choose whether the cloud copy survives.
+                    Button("Delete Locally (Keep Cloud Copy)", role: .destructive) {
+                        closeIfOpen(nb)
                         viewModel.deleteNotebook(nb)
+                        notebookToDelete = nil
                     }
-                    notebookToDelete = nil
+                    Button("Delete Locally & Unsync", role: .destructive) {
+                        closeIfOpen(nb)
+                        Task { await viewModel.deleteAndUnsync(nb) }
+                        notebookToDelete = nil
+                    }
+                } else {
+                    // Unsynced → offer a cloud backup before deleting.
+                    Button("Sync to Cloud, Then Delete Locally") {
+                        closeIfOpen(nb)
+                        Task { await viewModel.syncThenDeleteLocally(nb) }
+                        notebookToDelete = nil
+                    }
+                    Button("Delete Permanently", role: .destructive) {
+                        closeIfOpen(nb)
+                        viewModel.deleteNotebook(nb)
+                        notebookToDelete = nil
+                    }
                 }
+                Button("Cancel", role: .cancel) { notebookToDelete = nil }
             }
-        } message: { Text("\"\(notebookToDelete?.title ?? "")\" will be permanently deleted.") }
+        } message: {
+            if notebookToDelete?.lastSyncedAt != nil {
+                Text("This notebook is synced. You can keep its cloud copy or remove it everywhere.")
+            } else {
+                Text("This notebook is not synced. You can back it up to the cloud first, or delete it permanently.")
+            }
+        }
         // Error alert
         .alert("Error", isPresented: Binding(
             get: { viewModel.errorMessage != nil },
@@ -125,37 +212,62 @@ struct NotebookListView: View {
         ZStack {
             themeManager.background.ignoresSafeArea()
             ScrollView {
-                LazyVGrid(columns: columns, spacing: 22) {
-                    if viewModel.isLoading {
-                        ForEach(0..<6, id: \.self) { _ in NotebookCardShimmer() }
-                    } else if filteredNotebooks.isEmpty && !searchText.isEmpty {
-                        emptySearch.gridCellColumns(columns.count)
-                    } else if filteredNotebooks.isEmpty {
-                        emptyLibrary.gridCellColumns(columns.count)
-                    } else {
-                        ForEach(filteredNotebooks) { notebook in
-                            Button {
-                                withAnimation(.easeOut(duration: 0.2)) {
-                                    selectedNotebook = notebook
-                                    if !openNotebooks.contains(where: { $0.id == notebook.id }) {
-                                        openNotebooks.append(notebook)
-                                    }
-                                }
-                            } label: {
-                                NotebookCardView(
-                                    notebook: notebook,
-                                    isSelected: selectedNotebook?.id == notebook.id,
-                                    onRename: { renameText = notebook.title; notebookToRename = notebook },
-                                    onDelete: { notebookToDelete = notebook },
-                                    onEditCover: { notebookToEditCover = notebook }
-                                )
+                VStack(alignment: .leading, spacing: 0) {
+                    // Folder matches appear above notebooks when searching.
+                    if !filteredFolders.isEmpty {
+                        folderSearchResults
+                    }
+                    LazyVGrid(columns: columns, spacing: 22) {
+                        if viewModel.isLoading {
+                            ForEach(0..<6, id: \.self) { _ in NotebookCardShimmer() }
+                        } else if filteredNotebooks.isEmpty && !searchText.isEmpty {
+                            if filteredFolders.isEmpty {
+                                emptySearch.gridCellColumns(columns.count)
                             }
-                            .buttonStyle(NotebookButtonStyle())
-                            .transition(.scale(scale: 0.96).combined(with: .opacity))
+                        } else if filteredNotebooks.isEmpty {
+                            emptyLibrary.gridCellColumns(columns.count)
+                        } else {
+                            ForEach(filteredNotebooks) { notebook in
+                                Button {
+                                    openNotebook(notebook)
+                                } label: {
+                                    NotebookCardView(
+                                        notebook: notebook,
+                                        isSelected: selectedNotebook?.id == notebook.id,
+                                        onRename: { renameText = notebook.title; notebookToRename = notebook },
+                                        onDelete: { notebookToDelete = notebook },
+                                        onEditCover: { notebookToEditCover = notebook },
+                                        folders: viewModel.folders,
+                                        isInFolder: { viewModel.isNotebook(notebook, in: $0) },
+                                        onToggleFolder: { viewModel.toggleNotebook(notebook, in: $0) },
+                                        onTogglePin: { withAnimation(.easeOut(duration: 0.2)) { viewModel.togglePin(notebook) } }
+                                    )
+                                }
+                                .buttonStyle(NotebookButtonStyle())
+                                .overlay(alignment: .topTrailing) {
+                                    HStack(spacing: 5) {
+                                        if let synced = notebook.lastSyncedAt {
+                                            NotebookSyncBadge(date: synced)
+                                        }
+                                        NotebookCardMenuButton(
+                                            folders: viewModel.folders,
+                                            isSynced: notebook.lastSyncedAt != nil,
+                                            isPinned: notebook.isPinned,
+                                            isInFolder: { viewModel.isNotebook(notebook, in: $0) },
+                                            onToggleFolder: { viewModel.toggleNotebook(notebook, in: $0) },
+                                            onUnsync: { Task { await viewModel.unsync(notebook) } },
+                                            onDelete: { notebookToDelete = notebook },
+                                            onTogglePin: { withAnimation(.easeOut(duration: 0.2)) { viewModel.togglePin(notebook) } }
+                                        )
+                                    }
+                                    .offset(x: 7, y: -9)
+                                }
+                                .transition(.scale(scale: 0.96).combined(with: .opacity))
+                            }
                         }
                     }
+                    .padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 32)
                 }
-                .padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 32)
             }
         }
         .navigationTitle("InfiniteNote")
@@ -183,26 +295,15 @@ struct NotebookListView: View {
         ZStack {
             themeManager.background.ignoresSafeArea()
             gridOverlay
-            VStack(spacing: 22) {
-                Text("∞")
-                    .font(.system(size: 96, weight: .black, design: .rounded))
-                    .foregroundStyle(Color.burgundy)
-                    .rotationEffect(.degrees(-4))
-                    .shadow(color: themeManager.hardShadow, radius: 0, x: 5, y: 5)
-                VStack(spacing: 6) {
-                    Text("InfiniteNote").font(.cartoon(26, weight: .heavy)).foregroundStyle(themeManager.textPrimary)
-                    Text("Ideas deserve permanence.").font(.cartoon(15, weight: .medium)).foregroundStyle(themeManager.textSecondary)
-                }
-                Button { showCreateSheet = true } label: {
-                    Text("Create Notebook")
-                }
-                .buttonStyle(CartoonButtonStyle(fill: .burgundy))
-                .padding(.top, 4)
+            if let folder = liveSelectedFolder {
+                folderDetail(folder)
+            } else {
+                homeContent
             }
         }
         .navigationBarBackButtonHidden(true)
         .toolbar {
-            ToolbarItem(placement: .navigationBarLeading) {
+            ToolbarItemGroup(placement: .navigationBarLeading) {
                 Button { toggleBooksSidebar() } label: {
                     AssetIcon(
                         asset: "book-sidebar",
@@ -215,6 +316,10 @@ struct NotebookListView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Toggle books sidebar")
+
+                // ☀/🌙 — next to the book-sidebar icon (was a floating
+                // overlay that covered the folder edit button).
+                ThemeToggleButton(size: 38)
             }
         }
         .toolbar(removing: .sidebarToggle)
@@ -225,6 +330,281 @@ struct NotebookListView: View {
         withAnimation(.easeOut(duration: 0.22)) {
             columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
         }
+    }
+
+    /// Closes a notebook's editor tab before it gets deleted.
+    private func closeIfOpen(_ notebook: Notebook) {
+        withAnimation(.easeOut(duration: 0.2)) {
+            openNotebooks.removeAll { $0.id == notebook.id }
+            if selectedNotebook?.id == notebook.id { selectedNotebook = nil }
+        }
+    }
+
+    /// Opens a notebook in the editor (from the sidebar, a folder, or search).
+    private func openNotebook(_ notebook: Notebook) {
+        withAnimation(.easeOut(duration: 0.2)) {
+            selectedNotebook = notebook
+            if !openNotebooks.contains(where: { $0.id == notebook.id }) {
+                openNotebooks.append(notebook)
+            }
+        }
+    }
+
+    // MARK: - Homepage (hero + folders)
+
+    private var homeContent: some View {
+        ScrollView {
+            VStack(spacing: 34) {
+                // Brand hero
+                VStack(spacing: 18) {
+                    Text("∞")
+                        .font(.system(size: 84, weight: .black, design: .rounded))
+                        .foregroundStyle(Color.burgundy)
+                        .rotationEffect(.degrees(-4))
+                        .shadow(color: themeManager.hardShadow, radius: 0, x: 5, y: 5)
+                    VStack(spacing: 6) {
+                        Text("InfiniteNote").font(.cartoon(26, weight: .heavy)).foregroundStyle(themeManager.textPrimary)
+                        Text("Ideas deserve permanence.").font(.cartoon(15, weight: .medium)).foregroundStyle(themeManager.textSecondary)
+                    }
+                    Button { showCreateSheet = true } label: {
+                        Text("Create Notebook")
+                    }
+                    .buttonStyle(CartoonButtonStyle(fill: .burgundy))
+                }
+                .padding(.top, 46)
+
+                foldersSection
+            }
+            .padding(.bottom, 44)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private var foldersSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Folders")
+                    .font(.cartoon(22, weight: .heavy))
+                    .foregroundStyle(themeManager.textPrimary)
+                Spacer()
+                Button { showCreateFolderSheet = true } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: "folder.badge.plus").font(.system(size: 14, weight: .black))
+                        Text("New Folder").font(.cartoon(14, weight: .heavy))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 15).padding(.vertical, 9)
+                    .background(Capsule().fill(Color.palmLeafDark))
+                    .overlay(Capsule().strokeBorder(themeManager.outline, lineWidth: 2))
+                    .background(Capsule().fill(themeManager.hardShadow).offset(x: 2.5, y: 2.5))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("New folder")
+            }
+            .padding(.horizontal, 30)
+
+            if viewModel.folders.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "folder.badge.plus")
+                        .font(.system(size: 34, weight: .bold))
+                        .foregroundStyle(themeManager.textSecondary.opacity(0.6))
+                    Text("No folders yet")
+                        .font(.cartoon(15, weight: .bold)).foregroundStyle(themeManager.textSecondary)
+                    Text("Group notebooks without moving them\nout of your library.")
+                        .font(.cartoon(12.5, weight: .medium))
+                        .foregroundStyle(themeManager.textSecondary.opacity(0.8))
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 26)
+            } else {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 140, maximum: 185), spacing: 18)], spacing: 26) {
+                    ForEach(viewModel.folders) { folder in
+                        Button {
+                            withAnimation(.easeOut(duration: 0.2)) { selectedFolder = folder }
+                        } label: {
+                            FolderIconView(folder: folder, count: viewModel.notebookCount(in: folder))
+                        }
+                        .buttonStyle(NotebookButtonStyle())
+                        .contextMenu {
+                            Button { withAnimation(.easeOut(duration: 0.2)) { viewModel.togglePin(folder) } } label: {
+                                Label(folder.isPinned ? "Unpin" : "Pin Folder",
+                                      systemImage: folder.isPinned ? "pin.slash" : "pin")
+                            }
+                            Button { folderToEdit = folder } label: { Label("Edit Folder", systemImage: "pencil") }
+                            Divider()
+                            Button(role: .destructive) { folderToDelete = folder } label: { Label("Delete Folder", systemImage: "trash") }
+                        }
+                    }
+                }
+                .padding(.horizontal, 30)
+            }
+        }
+        .frame(maxWidth: 760)
+    }
+
+    // MARK: - Folder Detail (inline on the homepage)
+
+    private func folderDetail(_ folder: Folder) -> some View {
+        let items = viewModel.notebooks(in: folder)
+        let count = viewModel.notebookCount(in: folder)
+        return VStack(spacing: 0) {
+            // Header: back, folder identity, edit shortcut
+            HStack(spacing: 14) {
+                Button {
+                    withAnimation(.easeOut(duration: 0.2)) { selectedFolder = nil }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "chevron.left").font(.system(size: 14, weight: .black))
+                        Text("Home").font(.cartoon(15, weight: .bold))
+                    }
+                    .foregroundStyle(themeManager.iconTint)
+                    .padding(.vertical, 6).padding(.horizontal, 4)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 32))
+                    .foregroundStyle(Color.notebookCover(at: folder.colorIndex))
+                    .shadow(color: themeManager.hardShadow, radius: 0, x: 2.5, y: 2.5)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(folder.name)
+                        .font(.cartoon(22, weight: .heavy))
+                        .foregroundStyle(themeManager.textPrimary)
+                        .lineLimit(1)
+                    HStack(spacing: 8) {
+                        if let author = folder.author, !author.isEmpty {
+                            Text("by \(author)")
+                                .font(.cartoon(12.5, weight: .semibold))
+                                .foregroundStyle(themeManager.textSecondary)
+                        }
+                        Text("\(count) \(count == 1 ? "notebook" : "notebooks")")
+                            .font(.cartoon(12.5, weight: .semibold))
+                            .foregroundStyle(themeManager.textSecondary)
+                    }
+                }
+                Spacer()
+                Button { folderToEdit = folder } label: {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 14, weight: .black))
+                        .foregroundStyle(themeManager.iconTint)
+                        .frame(width: 34, height: 34)
+                        .background(Circle().fill(themeManager.card))
+                        .overlay(Circle().strokeBorder(themeManager.outline, lineWidth: 2))
+                        .background(Circle().fill(themeManager.hardShadow).offset(x: 2, y: 2))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Edit folder")
+            }
+            .padding(.horizontal, 26).padding(.top, 20).padding(.bottom, 14)
+
+            if items.isEmpty {
+                Spacer()
+                VStack(spacing: 10) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 44, weight: .bold))
+                        .foregroundStyle(Color.notebookCover(at: folder.colorIndex).opacity(0.7))
+                    Text("This folder is empty")
+                        .font(.cartoon(17, weight: .heavy)).foregroundStyle(themeManager.textPrimary)
+                    Text("Long-press a notebook in the sidebar\nand choose \"Add to Folder\".")
+                        .font(.cartoon(13.5, weight: .medium))
+                        .foregroundStyle(themeManager.textSecondary)
+                        .multilineTextAlignment(.center)
+                }
+                Spacer()
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 22) {
+                        ForEach(items) { notebook in
+                            Button {
+                                openNotebook(notebook)
+                            } label: {
+                                NotebookCardView(
+                                    notebook: notebook,
+                                    isSelected: false,
+                                    onRename: { renameText = notebook.title; notebookToRename = notebook },
+                                    onDelete: { notebookToDelete = notebook },
+                                    onEditCover: { notebookToEditCover = notebook },
+                                    onRemoveFromFolder: {
+                                        withAnimation(.easeOut(duration: 0.2)) {
+                                            viewModel.removeNotebook(notebook, from: folder)
+                                        }
+                                    },
+                                    onTogglePin: { withAnimation(.easeOut(duration: 0.2)) { viewModel.togglePin(notebook) } }
+                                )
+                            }
+                            .buttonStyle(NotebookButtonStyle())
+                            .overlay(alignment: .topTrailing) {
+                                if let synced = notebook.lastSyncedAt {
+                                    NotebookSyncBadge(date: synced).offset(x: 7, y: -9)
+                                }
+                            }
+                            .transition(.scale(scale: 0.96).combined(with: .opacity))
+                        }
+                    }
+                    .padding(.horizontal, 26).padding(.top, 10).padding(.bottom, 32)
+                }
+            }
+        }
+    }
+
+    // MARK: - Folder Search Results (sidebar)
+
+    private var folderSearchResults: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("FOLDERS")
+                .font(.cartoon(12, weight: .heavy))
+                .foregroundStyle(themeManager.textSecondary)
+                .padding(.horizontal, 24)
+            ForEach(filteredFolders) { folder in
+                Button {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        selectedFolder = folder
+                        selectedNotebook = nil
+                    }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "folder.fill")
+                            .font(.system(size: 18))
+                            .foregroundStyle(Color.notebookCover(at: folder.colorIndex))
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(folder.name)
+                                .font(.cartoon(15, weight: .bold))
+                                .foregroundStyle(themeManager.textPrimary)
+                                .lineLimit(1)
+                            if let author = folder.author, !author.isEmpty {
+                                Text("by \(author)")
+                                    .font(.cartoon(11, weight: .medium))
+                                    .foregroundStyle(themeManager.textSecondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        Spacer()
+                        Text("\(viewModel.notebookCount(in: folder))")
+                            .font(.cartoon(12, weight: .heavy))
+                            .foregroundStyle(themeManager.textSecondary)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(themeManager.textSecondary)
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(themeManager.card))
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(themeManager.border, lineWidth: 1))
+                    .padding(.horizontal, 20)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            if !filteredNotebooks.isEmpty {
+                Text("NOTEBOOKS")
+                    .font(.cartoon(12, weight: .heavy))
+                    .foregroundStyle(themeManager.textSecondary)
+                    .padding(.horizontal, 24).padding(.top, 8)
+            }
+        }
+        .padding(.top, 12)
     }
 
     // MARK: - Empty States

@@ -254,10 +254,14 @@ struct DrawingCanvasView: UIViewRepresentable {
     /// to this makes ink inversion line up with the page: black on a white
     /// page, white on a black page.
     var isDarkTheme: Bool = false
+    /// Read-only mode: drawing and all editing gestures are disabled; the
+    /// ONLY recognized gestures are 3-finger horizontal swipes —
+    /// right→left = next page, left→right = previous page.
+    var isReadOnly: Bool = false
     var canvasController: CanvasController
     var onErasePage: () -> Void
-    var onNextPage:  () -> Void = {}   // 3-finger swipe up
-    var onPrevPage:  () -> Void = {}   // 3-finger swipe down
+    var onNextPage:  () -> Void = {}   // 3-finger swipe up (edit) / swipe left (read-only)
+    var onPrevPage:  () -> Void = {}   // 3-finger swipe down (edit) / swipe right (read-only)
 
     func makeUIView(context: Context) -> ManagedCanvasView {
         let canvas = ManagedCanvasView()
@@ -336,6 +340,25 @@ struct DrawingCanvasView: UIViewRepresentable {
         prevPage.cancelsTouchesInView    = false
         canvas.addGestureRecognizer(prevPage)
 
+        // ── Read-only page turns: 3-finger horizontal swipes ────────────
+        // right→left = next page; left→right = previous page.
+        // Disabled in edit mode; the ONLY active gestures in read-only mode.
+        let readNext = UISwipeGestureRecognizer(
+            target: coord, action: #selector(Coordinator.handleSwipeLeft))
+        readNext.numberOfTouchesRequired = 3
+        readNext.direction               = .left
+        readNext.cancelsTouchesInView    = false
+        readNext.isEnabled               = false
+        canvas.addGestureRecognizer(readNext)
+
+        let readPrev = UISwipeGestureRecognizer(
+            target: coord, action: #selector(Coordinator.handleSwipeRight))
+        readPrev.numberOfTouchesRequired = 3
+        readPrev.direction               = .right
+        readPrev.cancelsTouchesInView    = false
+        readPrev.isEnabled               = false
+        canvas.addGestureRecognizer(readPrev)
+
         // Patch any PencilKit single-tap GRs that were already on the canvas.
         for gr in preExisting {
             guard let tap = gr as? UITapGestureRecognizer,
@@ -344,10 +367,13 @@ struct DrawingCanvasView: UIViewRepresentable {
             if tap.numberOfTouchesRequired == 3 { tap.require(toFail: redo) }
         }
 
-        coord.ourGestureRecognizers = [undo, redo, erase, prevPage, nextPage]
+        coord.ourGestureRecognizers = [undo, redo, erase, prevPage, nextPage, readNext, readPrev]
+        coord.editingGestures = [undo, redo, erase, prevPage, nextPage]
+        coord.readingGestures = [readNext, readPrev]
         canvasController.canvasView = canvas
         coord.canvasController      = canvasController
 
+        applyReadOnlyState(to: canvas, coordinator: coord)
         applyTool(to: canvas)
         return canvas
     }
@@ -368,7 +394,15 @@ struct DrawingCanvasView: UIViewRepresentable {
             canvas.contentSize = bounds.size
         }
 
+        applyReadOnlyState(to: canvas, coordinator: context.coordinator)
         applyTool(to: canvas)
+    }
+
+    /// Flips drawing + gesture availability between edit and read-only modes.
+    private func applyReadOnlyState(to canvas: ManagedCanvasView, coordinator: Coordinator) {
+        canvas.drawingGestureRecognizer.isEnabled = !isReadOnly
+        coordinator.editingGestures.forEach { $0.isEnabled = !isReadOnly }
+        coordinator.readingGestures.forEach { $0.isEnabled = isReadOnly }
     }
 
     private func applyTool(to canvas: PKCanvasView) {
@@ -423,6 +457,10 @@ struct DrawingCanvasView: UIViewRepresentable {
         var canvasController: CanvasController?
         /// All gesture recognizers we own — used in shouldRecognizeSimultaneously.
         var ourGestureRecognizers: [UIGestureRecognizer] = []
+        /// Gestures that modify content — disabled in read-only mode.
+        var editingGestures: [UIGestureRecognizer] = []
+        /// Read-only page-turn swipes — enabled ONLY in read-only mode.
+        var readingGestures: [UIGestureRecognizer] = []
         private var debounceTask: Task<Void, Never>?
 
         init(_ parent: DrawingCanvasView) { self.parent = parent }
@@ -470,7 +508,9 @@ struct DrawingCanvasView: UIViewRepresentable {
             parent.onErasePage()
         }
 
-        @objc func handleSwipeUp()   { parent.onNextPage() }   // 3-finger up → next / new
-        @objc func handleSwipeDown() { parent.onPrevPage() }   // 3-finger down → previous
+        @objc func handleSwipeUp()    { parent.onNextPage() }  // 3-finger up → next / new
+        @objc func handleSwipeDown()  { parent.onPrevPage() }  // 3-finger down → previous
+        @objc func handleSwipeLeft()  { parent.onNextPage() }  // read-only: right→left → next
+        @objc func handleSwipeRight() { parent.onPrevPage() }  // read-only: left→right → previous
     }
 }

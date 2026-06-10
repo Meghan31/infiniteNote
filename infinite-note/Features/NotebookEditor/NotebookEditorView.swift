@@ -10,10 +10,14 @@ struct NotebookEditorView: View {
     let onCloseNotebook: (Notebook) -> Void
     let onGoHome: () -> Void
     let onToggleBooksSidebar: () -> Void
+    var onSynced: (Date) -> Void = { _ in }
 
     @State private var viewModel: NotebookEditorViewModel
     @State private var showSyncSheet = false
     @State private var showPageSidebar = true
+    /// Read-only mode: drawing/editing disabled; pages turn with 3-finger
+    /// horizontal swipes; the toolbar collapses to just the read-mode icon.
+    @State private var isReadOnly = false
 
     // Drawing tool state
     @State private var selectedTool: DrawingToolType = .pen
@@ -75,7 +79,8 @@ struct NotebookEditorView: View {
         onSelectNotebook: @escaping (Notebook) -> Void = { _ in },
         onCloseNotebook: @escaping (Notebook) -> Void = { _ in },
         onGoHome: @escaping () -> Void = {},
-        onToggleBooksSidebar: @escaping () -> Void = {}
+        onToggleBooksSidebar: @escaping () -> Void = {},
+        onSynced: @escaping (Date) -> Void = { _ in }
     ) {
         self.notebook = notebook
         self.openNotebooks = openNotebooks
@@ -83,6 +88,7 @@ struct NotebookEditorView: View {
         self.onCloseNotebook = onCloseNotebook
         self.onGoHome = onGoHome
         self.onToggleBooksSidebar = onToggleBooksSidebar
+        self.onSynced = onSynced
         self._viewModel = State(initialValue: NotebookEditorViewModel(notebook: notebook))
     }
 
@@ -112,10 +118,11 @@ struct NotebookEditorView: View {
                         color: UIColor(selectedColor),
                         lineWidth: currentSize,
                         isDarkTheme: themeManager.isDark,
+                        isReadOnly: isReadOnly,
                         canvasController: viewModel.canvasController,
                         onErasePage: { showErasePageConfirm = true },
-                        onNextPage: { handleSwipeUpNext() },     // 3-finger up
-                        onPrevPage: { handleSwipeDownPrev() }    // 3-finger down
+                        onNextPage: { handleSwipeUpNext() },     // 3-finger up / read-only swipe left
+                        onPrevPage: { handleSwipeDownPrev() }    // 3-finger down / read-only swipe right
                     )
                     pageFooter
                     if let hint = pageHintText {
@@ -136,7 +143,13 @@ struct NotebookEditorView: View {
         .background(SidebarToggleHider().frame(width: 0, height: 0))
         .onAppear { viewModel.load() }
         .onDisappear { viewModel.saveCurrentDrawing() }
-        .sheet(isPresented: $showSyncSheet) { SyncView(notebook: notebook) }
+        .sheet(isPresented: $showSyncSheet) {
+            SyncView(
+                notebook: notebook,
+                canvasSize: viewModel.canvasController.canvasView?.bounds.size,
+                onSynced: onSynced
+            )
+        }
         // Share the notebook PDF to other apps.
         .sheet(isPresented: $showShareSheet) {
             if let url = sharePDFURL { ShareSheet(items: [url]) }
@@ -247,7 +260,27 @@ struct NotebookEditorView: View {
 
     private var drawingToolbar: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 0) {
+            if isReadOnly {
+                // Read-only: everything in this bar is hidden except the
+                // read-mode icon, which exits back to editing.
+                HStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    readOnlyToggleButton.padding(.trailing, 4)
+                }
+                .frame(height: 62)
+                .background(themeManager.card)
+            } else {
+                editingToolbarRow
+            }
+
+            // Heavy ink rule under the bar — it sits at the top of the page now.
+            Rectangle().fill(themeManager.outline).frame(height: 2)
+        }
+        .animation(.easeOut(duration: 0.2), value: isReadOnly)
+    }
+
+    private var editingToolbarRow: some View {
+        HStack(spacing: 0) {
                 // Sidebar toggle.
                 Button { withAnimation(.easeOut(duration: 0.22)) { showPageSidebar.toggle() } } label: {
                     AssetIcon(
@@ -291,19 +324,41 @@ struct NotebookEditorView: View {
 
                 toolbarDivider
 
-                // Undo / Redo
+                // Undo / Redo + read-only toggle
                 HStack(spacing: 0) {
                     toolbarActionButton(icon: "arrow.uturn.backward") { viewModel.undo() }
                     toolbarActionButton(icon: "arrow.uturn.forward")  { viewModel.redo() }
+                    readOnlyToggleButton
                 }
                 .padding(.trailing, 4)
-            }
-            .frame(height: 62)
-            .background(themeManager.card)
-
-            // Heavy ink rule under the bar — it sits at the top of the page now.
-            Rectangle().fill(themeManager.outline).frame(height: 2)
         }
+        .frame(height: 62)
+        .background(themeManager.card)
+    }
+
+    /// Enters / exits read-only mode. Active state sits on a sage chip with
+    /// the cartoon hard shadow, like a selected tool.
+    private var readOnlyToggleButton: some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.2)) { isReadOnly.toggle() }
+        } label: {
+            Image(systemName: isReadOnly ? "eye.fill" : "eye")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(isReadOnly ? themeManager.outline : themeManager.iconTint)
+                .frame(width: 39, height: 39)
+                .background(
+                    Circle().fill(isReadOnly ? themeManager.selectionColor : Color.clear)
+                )
+                .background(
+                    Circle()
+                        .fill(isReadOnly ? themeManager.hardShadow.opacity(0.28) : Color.clear)
+                        .offset(x: 2, y: 2.5)
+                )
+                .contentShape(Circle())
+                .frame(width: 42, height: 44)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isReadOnly ? "Exit read-only mode" : "Read-only mode")
     }
 
     // MARK: - Page Style Popover
@@ -524,6 +579,7 @@ struct NotebookEditorView: View {
                             accentColor: Color.notebookCover(at: notebook.coverColorIndex),
                             refreshToken: viewModel.refreshToken(for: page),
                             drawingService: DrawingService.shared,
+                            canvasSize: viewModel.canvasController.canvasView?.bounds.size,
                             onThumbnailReady: { img in viewModel.storeThumbnail(img, for: page.id) }
                         ) {
                             withAnimation(.easeOut(duration: 0.2)) { viewModel.goToPage(at: index) }
@@ -673,7 +729,11 @@ struct NotebookEditorView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Share PDF")
 
-            Button { showSyncSheet = true } label: {
+            Button {
+                // Persist in-flight strokes so the synced PDF is current.
+                viewModel.saveCurrentDrawing()
+                showSyncSheet = true
+            } label: {
                 capsuleActionIcon(asset: "cloud-sync", systemName: "icloud.and.arrow.up", size: 33)
             }
             .buttonStyle(.plain)
@@ -822,8 +882,8 @@ struct NotebookEditorView: View {
 
     @ToolbarContentBuilder
     private var editorToolbar: some ToolbarContent {
-        // Books (notebook list) sidebar toggle.
-        ToolbarItem(placement: .navigationBarLeading) {
+        // Books (notebook list) sidebar toggle + theme switch.
+        ToolbarItemGroup(placement: .navigationBarLeading) {
             Button { onToggleBooksSidebar() } label: {
                 AssetIcon(
                     asset: "book-sidebar",
@@ -836,6 +896,9 @@ struct NotebookEditorView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Toggle books sidebar")
+
+            // ☀/🌙 — next to the book-sidebar icon.
+            ThemeToggleButton(size: 38)
         }
         ToolbarItemGroup(placement: .navigationBarTrailing) {
             // Scale / ruler
@@ -868,11 +931,13 @@ struct NotebookEditorView: View {
     }
 
     /// 3-finger swipe up → next page. On the last page, a second up-swipe
-    /// within 5 seconds creates a new page.
+    /// within 5 seconds creates a new page (never in read-only mode).
     private func handleSwipeUpNext() {
         if viewModel.currentPageIndex < viewModel.pages.count - 1 {
             lastEndSwipeUpTime = nil
             withAnimation(.easeOut(duration: 0.25)) { viewModel.goToNextPage() }
+        } else if isReadOnly {
+            showPageHint("This is the last page")
         } else {
             let now = Date()
             if let last = lastEndSwipeUpTime, now.timeIntervalSince(last) <= 5 {
@@ -963,6 +1028,7 @@ struct PageThumbnailView: View {
     let accentColor: Color
     let refreshToken: Int
     let drawingService: DrawingService
+    var canvasSize: CGSize?
     var onThumbnailReady: (UIImage) -> Void
     var onTap: () -> Void
     var onDelete: () -> Void
@@ -1027,10 +1093,18 @@ struct PageThumbnailView: View {
         .contextMenu {
             Button(role: .destructive) { onDelete() } label: { Label("Delete Page", systemImage: "trash") }
         }
-        // Lazy-load thumbnail; re-render when refreshToken changes (after each save)
-        .task(id: refreshToken) {
+        // Lazy-load thumbnail; re-render when the drawing is saved
+        // (refreshToken) or the theme flips (isDark).
+        .task(id: "\(refreshToken)-\(themeManager.isDark)") {
+            let size = canvasSize
+            let dark = themeManager.isDark
             let img = await Task.detached(priority: .background) {
-                drawingService.renderThumbnail(for: page, size: CGSize(width: 76, height: 96))
+                drawingService.renderThumbnail(
+                    for: page,
+                    size: CGSize(width: 76, height: 96),
+                    canvasSize: size,
+                    isDark: dark
+                )
             }.value
             thumbnail = img
             onThumbnailReady(img)

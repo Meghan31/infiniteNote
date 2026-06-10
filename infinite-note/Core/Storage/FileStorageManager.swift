@@ -70,6 +70,39 @@ final class FileStorageManager {
         try? FileManager.default.removeItem(at: url)
     }
 
+    // MARK: - Folder Image
+
+    private var foldersRootURL: URL {
+        FileManager.default
+            .urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("folders")
+    }
+
+    func saveFolderImage(_ data: Data, folderId: String) throws {
+        let dir = folderDirectory(folderId: folderId)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try data.write(to: folderImageURL(folderId: folderId))
+    }
+
+    func loadFolderImage(folderId: String) -> UIImage? {
+        let url = folderImageURL(folderId: folderId)
+        guard FileManager.default.fileExists(atPath: url.path),
+              let data = try? Data(contentsOf: url) else { return nil }
+        return UIImage(data: data)
+    }
+
+    func deleteFolderFiles(folderId: String) {
+        try? FileManager.default.removeItem(at: folderDirectory(folderId: folderId))
+    }
+
+    private func folderDirectory(folderId: String) -> URL {
+        foldersRootURL.appendingPathComponent(folderId)
+    }
+
+    private func folderImageURL(folderId: String) -> URL {
+        folderDirectory(folderId: folderId).appendingPathComponent("cover.jpg")
+    }
+
     // MARK: - Deletion
 
     func deleteNotebookFiles(notebookId: String) throws {

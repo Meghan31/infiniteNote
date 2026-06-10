@@ -58,6 +58,27 @@ final class NotebookService: @unchecked Sendable {
         try db.dbQueue.write { db in try updated.update(db) }
     }
 
+    /// Pins / unpins the notebook (pinned sort first in the sidebar).
+    func setPinned(_ pinned: Bool, for notebook: Notebook) throws {
+        var updated = notebook
+        updated.isPinned = pinned
+        try db.dbQueue.write { db in try updated.update(db) }
+    }
+
+    /// Stamps a successful cloud sync on the notebook.
+    func markSynced(_ notebook: Notebook, at date: Date) throws {
+        var updated = notebook
+        updated.lastSyncedAt = date
+        try db.dbQueue.write { db in try updated.update(db) }
+    }
+
+    /// Clears the sync stamp after an unsync (badge disappears).
+    func clearSyncStamp(_ notebook: Notebook) throws {
+        var updated = notebook
+        updated.lastSyncedAt = nil
+        try db.dbQueue.write { db in try updated.update(db) }
+    }
+
     /// Updates the optional PDF-cover details (description / author).
     func updateDetails(description: String?, author: String?, for notebook: Notebook) throws {
         var updated = notebook

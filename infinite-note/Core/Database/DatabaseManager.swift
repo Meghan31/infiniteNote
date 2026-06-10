@@ -64,6 +64,44 @@ final class DatabaseManager: @unchecked Sendable {
             }
         }
 
+        // v5 — home-screen folders. The join table's composite primary key
+        // guarantees a notebook can be added to a folder only once.
+        migrator.registerMigration("v5_folders") { db in
+            try db.create(table: "folders", ifNotExists: true) { t in
+                t.column("id", .text).primaryKey()
+                t.column("name", .text).notNull()
+                t.column("color_index", .integer).notNull().defaults(to: 0)
+                t.column("image_path", .text)
+                t.column("author", .text)
+                t.column("created_at", .datetime).notNull()
+                t.column("updated_at", .datetime).notNull()
+            }
+            try db.create(table: "folder_notebooks", ifNotExists: true) { t in
+                t.column("folder_id", .text).notNull()
+                    .references("folders", onDelete: .cascade)
+                t.column("notebook_id", .text).notNull()
+                    .references("notebooks", onDelete: .cascade)
+                t.primaryKey(["folder_id", "notebook_id"])
+            }
+        }
+
+        // v6 — cloud sync timestamp (nil = never synced)
+        migrator.registerMigration("v6_sync") { db in
+            try db.alter(table: "notebooks") { t in
+                t.add(column: "last_synced_at", .datetime)
+            }
+        }
+
+        // v7 — pinned notebooks + folders (pinned sort first)
+        migrator.registerMigration("v7_pins") { db in
+            try db.alter(table: "notebooks") { t in
+                t.add(column: "pinned", .boolean).notNull().defaults(to: false)
+            }
+            try db.alter(table: "folders") { t in
+                t.add(column: "pinned", .boolean).notNull().defaults(to: false)
+            }
+        }
+
         try migrator.migrate(dbQueue)
     }
 }

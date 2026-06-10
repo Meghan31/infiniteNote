@@ -11,6 +11,10 @@ import SwiftUI
 // a crescent moon for dark, both wearing the cartoon ink outline + hard shadow.
 
 struct ThemeToggleButton: View {
+    /// Disc diameter — 46 for the floating overlay (sheets), smaller when
+    /// embedded in a navigation bar next to the book-sidebar icon.
+    var size: CGFloat = 46
+
     @EnvironmentObject private var themeManager: ThemeManager
 
     private var glyphColor: Color {
@@ -41,10 +45,12 @@ struct ThemeToggleButton: View {
                 }
                 .id(themeManager.theme)
                 .transition(.scale(scale: 0.3).combined(with: .opacity))
+                .scaleEffect(size / 46)
             }
-            .frame(width: 46, height: 46)
+            .frame(width: size, height: size)
             .background(
-                Circle().fill(themeManager.hardShadow).offset(x: 4, y: 4)
+                Circle().fill(themeManager.hardShadow)
+                    .offset(x: size * 0.087, y: size * 0.087)
             )
             .rotationEffect(.degrees(themeManager.isDark ? 360 : 0))
             .animation(.spring(response: 0.45, dampingFraction: 0.6), value: themeManager.theme)

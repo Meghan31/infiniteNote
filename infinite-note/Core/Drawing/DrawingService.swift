@@ -71,29 +71,70 @@ final class DrawingService: @unchecked Sendable {
 
     // MARK: - Thumbnails
 
-    /// Renders the drawing for `page` into a small UIImage suitable for sidebar thumbnails.
+    /// Renders the drawing for `page` into a small UIImage suitable for
+    /// sidebar thumbnails — a true mini version of the page.
     /// Runs entirely off the main thread — call from a detached Task.
-    func renderThumbnail(for page: Page, size: CGSize = CGSize(width: 72, height: 95)) -> UIImage {
+    ///
+    /// - Parameters:
+    ///   - canvasSize: the live PKCanvasView bounds. Strokes live in this
+    ///     coordinate space, so it's required to scale them correctly
+    ///     (the old hardcoded 2048×2732 space rendered strokes ~30× too
+    ///     small — which is why thumbnails looked like blank pages).
+    ///   - isDark: render for the dark theme — black page, and PencilKit
+    ///     auto-inverts black ink to white under the dark trait.
+    func renderThumbnail(
+        for page: Page,
+        size: CGSize = CGSize(width: 72, height: 95),
+        canvasSize: CGSize? = nil,
+        isDark: Bool = false
+    ) -> UIImage {
         let drawing = (try? loadDrawing(for: page)) ?? PKDrawing()
-        // Draw the content into a small CGContext via UIGraphicsImageRenderer
+
+        // Empty page → just the themed page background. Skips the Metal
+        // stroke render entirely (PencilKit aborts on degenerate textures).
+        if drawing.strokes.isEmpty {
+            let renderer = UIGraphicsImageRenderer(size: size)
+            return renderer.image { ctx in
+                (isDark ? UIColor.black : UIColor.white).setFill()
+                ctx.fill(CGRect(origin: .zero, size: size))
+            }
+        }
+
+        // Stroke coordinate space: live canvas bounds → drawn extent → A4-ish.
+        // IMPORTANT: every value must be finite and positive — an empty
+        // drawing has bounds == CGRect.null (maxX/maxY == +Inf), and feeding
+        // Inf/zero into the renderer crashes in Metal (texture height 0).
+        let fallback = CGSize(width: 1190, height: 1684)
+        var source = canvasSize ?? .zero
+        if !source.width.isFinite || !source.height.isFinite
+            || source.width < 1 || source.height < 1 {
+            let bounds = drawing.bounds
+            let usable = bounds.maxX.isFinite && bounds.maxY.isFinite
+                && bounds.maxX > 1 && bounds.maxY > 1
+            source = usable ? CGSize(width: bounds.maxX, height: bounds.maxY) : fallback
+        }
+
+        // Render strokes under an explicit trait so ink inversion matches
+        // the in-app page (black-on-white light, white-on-black dark).
+        var strokeImage = UIImage()
+        let render = {
+            strokeImage = drawing.image(from: CGRect(origin: .zero, size: source), scale: 1.0)
+        }
+        UITraitCollection(userInterfaceStyle: isDark ? .dark : .light)
+            .performAsCurrent(render)
+
         let renderer = UIGraphicsImageRenderer(size: size)
         return renderer.image { ctx in
-            // Fill white background
-            UIColor.white.setFill()
+            // Page background — mirrors themePageLight / themePageDark.
+            (isDark ? UIColor.black : UIColor.white).setFill()
             ctx.fill(CGRect(origin: .zero, size: size))
-            // Scale the 2048×2732 drawing coordinate space down to thumbnail size
-            let drawingW: CGFloat = 2048
-            let drawingH: CGFloat = 2732
-            let sx = size.width / drawingW
-            let sy = size.height / drawingH
-            let s = min(sx, sy)
-            ctx.cgContext.scaleBy(x: s, y: s)
-            // Render strokes
-            let strokeImage = drawing.image(
-                from: CGRect(x: 0, y: 0, width: drawingW, height: drawingH),
-                scale: 1.0
-            )
-            strokeImage.draw(in: CGRect(x: 0, y: 0, width: drawingW, height: drawingH))
+
+            // Aspect-fit the page into the thumbnail, centered.
+            let s = min(size.width / source.width, size.height / source.height)
+            let drawSize = CGSize(width: source.width * s, height: source.height * s)
+            let origin = CGPoint(x: (size.width - drawSize.width) / 2,
+                                 y: (size.height - drawSize.height) / 2)
+            strokeImage.draw(in: CGRect(origin: origin, size: drawSize))
         }
     }
 }

@@ -19,6 +19,13 @@ struct NotebookCardView: View {
     var onRename: () -> Void
     var onDelete: () -> Void
     var onEditCover: () -> Void = {}
+    // Folder integration (book-sidebar: add/remove via toggle;
+    // folder view: direct remove).
+    var folders: [Folder] = []
+    var isInFolder: (Folder) -> Bool = { _ in false }
+    var onToggleFolder: (Folder) -> Void = { _ in }
+    var onRemoveFromFolder: (() -> Void)? = nil
+    var onTogglePin: () -> Void = {}
 
     @State private var coverImage: UIImage?
     @EnvironmentObject private var themeManager: ThemeManager
@@ -93,9 +100,38 @@ struct NotebookCardView: View {
             shadowOffset: isSelected ? 7 : 5,
             outlineColor: isSelected ? .burgundy : themeManager.outline
         )
+        .overlay(alignment: .topLeading) {
+            // Pinned indicator — the cartoon pin from assets.
+            if notebook.isPinned {
+                AssetIcon(asset: "pin", systemName: "pin.fill", size: 26, fallbackTint: .burgundy)
+                    .rotationEffect(.degrees(-22))
+                    .offset(x: -8, y: -10)
+                    .allowsHitTesting(false)
+            }
+        }
         .contextMenu {
+            Button { onTogglePin() } label: {
+                Label(notebook.isPinned ? "Unpin" : "Pin Notebook",
+                      systemImage: notebook.isPinned ? "pin.slash" : "pin")
+            }
             Button { onRename() } label: { Label("Rename", systemImage: "pencil") }
             Button { onEditCover() } label: { Label("Edit Cover", systemImage: "photo") }
+            if !folders.isEmpty {
+                Menu {
+                    ForEach(folders) { folder in
+                        Button { onToggleFolder(folder) } label: {
+                            Label(folder.name, systemImage: isInFolder(folder) ? "checkmark.circle.fill" : "folder")
+                        }
+                    }
+                } label: {
+                    Label("Add to Folder", systemImage: "folder.badge.plus")
+                }
+            }
+            if let onRemoveFromFolder {
+                Button(role: .destructive) { onRemoveFromFolder() } label: {
+                    Label("Remove from Folder", systemImage: "folder.badge.minus")
+                }
+            }
             Divider()
             Button(role: .destructive) { onDelete() } label: { Label("Delete", systemImage: "trash") }
         }
@@ -117,6 +153,113 @@ struct NotebookCardView: View {
     @ViewBuilder
     private var cardBackground: some View {
         themeManager.card
+    }
+}
+
+// MARK: - Card ⋮ Menu (book-sidebar)
+//
+// Three vertical dots overlaid on each sidebar card. Offers folder moves,
+// unsync (when synced), and delete — which then walks through the
+// sync-aware delete steps. Sits outside the card's open-button so tapping
+// it never opens the notebook.
+
+struct NotebookCardMenuButton: View {
+    let folders: [Folder]
+    let isSynced: Bool
+    var isPinned: Bool = false
+    var isInFolder: (Folder) -> Bool = { _ in false }
+    var onToggleFolder: (Folder) -> Void = { _ in }
+    var onUnsync: () -> Void = {}
+    var onDelete: () -> Void = {}
+    var onTogglePin: () -> Void = {}
+
+    @EnvironmentObject private var themeManager: ThemeManager
+
+    var body: some View {
+        Menu {
+            Button { onTogglePin() } label: {
+                Label(isPinned ? "Unpin" : "Pin Notebook",
+                      systemImage: isPinned ? "pin.slash" : "pin")
+            }
+            if folders.isEmpty {
+                Button {} label: { Label("No folders yet", systemImage: "folder") }
+                    .disabled(true)
+            } else {
+                Menu {
+                    ForEach(folders) { folder in
+                        Button { onToggleFolder(folder) } label: {
+                            Label(folder.name, systemImage: isInFolder(folder) ? "checkmark.circle.fill" : "folder")
+                        }
+                    }
+                } label: {
+                    Label("Move to Folder", systemImage: "folder.badge.plus")
+                }
+            }
+            if isSynced {
+                Button { onUnsync() } label: {
+                    Label("Unsync from Cloud", systemImage: "icloud.slash")
+                }
+            }
+            Divider()
+            Button(role: .destructive) { onDelete() } label: {
+                Label("Delete\u{2026}", systemImage: "trash")
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 12, weight: .black))
+                .rotationEffect(.degrees(90))
+                .foregroundStyle(themeManager.iconTint)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(themeManager.card))
+                .overlay(Circle().strokeBorder(themeManager.outline, lineWidth: 2))
+                .background(Circle().fill(themeManager.hardShadow).offset(x: 2, y: 2))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Notebook options")
+    }
+}
+
+// MARK: - Sync Badge
+//
+// Small cloud sticker shown on cards of synced notebooks. Tapping it pops
+// over the last-synced date. Overlaid OUTSIDE the card's open-button so the
+// tap doesn't open the notebook.
+
+struct NotebookSyncBadge: View {
+    let date: Date
+
+    @State private var showPopover = false
+    @EnvironmentObject private var themeManager: ThemeManager
+
+    var body: some View {
+        Button { showPopover.toggle() } label: {
+            Image(systemName: "checkmark.icloud.fill")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(Color.pineTeal))
+                .overlay(Circle().strokeBorder(themeManager.outline, lineWidth: 2))
+                .background(Circle().fill(themeManager.hardShadow).offset(x: 2, y: 2))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Synced to cloud")
+        .popover(isPresented: $showPopover, arrowEdge: .bottom) {
+            HStack(spacing: 8) {
+                Image(systemName: "clock.arrow.2.circlepath")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.pineTeal)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Synced to cloud")
+                        .font(.cartoon(13, weight: .heavy))
+                        .foregroundStyle(themeManager.textPrimary)
+                    Text(date.formatted(date: .abbreviated, time: .shortened))
+                        .font(.cartoon(12, weight: .medium))
+                        .foregroundStyle(themeManager.textSecondary)
+                }
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .presentationCompactAdaptation(.popover)
+        }
     }
 }
 

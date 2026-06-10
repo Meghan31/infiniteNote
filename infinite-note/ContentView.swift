@@ -11,9 +11,9 @@ struct ContentView: View {
     var body: some View {
         NotebookListView()
             .background(themeManager.background.ignoresSafeArea())
-            // Floating ☀/🌙 toggle — ZStack overlay above home & editor.
-            // Sheets apply the same overlay to stay covered in modals.
-            .themeToggleOverlay()
+        // The ☀/🌙 toggle lives in the navigation bar next to the
+        // book-sidebar icon (home + editor). Sheets still use the floating
+        // overlay since they cover the navigation bar.
     }
 }
 

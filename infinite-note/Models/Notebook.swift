@@ -16,6 +16,10 @@ struct Notebook: Identifiable, Hashable, Sendable {
     /// (`noteDescription` to avoid clashing with `CustomStringConvertible`.)
     var noteDescription: String?
     var author: String?
+    /// Last successful cloud sync. `nil` → never synced (no badge).
+    var lastSyncedAt: Date?
+    /// Pinned notebooks sort to the front of the book-sidebar.
+    var isPinned: Bool = false
 
     init(
         id: String = UUID().uuidString,
@@ -56,6 +60,8 @@ extension Notebook: FetchableRecord, MutablePersistableRecord {
         defaultPageStyle = PageStyle(rawValue: styleRaw) ?? .grid
         noteDescription = row["note_description"]
         author = row["author"]
+        lastSyncedAt = row["last_synced_at"]
+        isPinned = row["pinned"] ?? false
     }
 
     func encode(to container: inout PersistenceContainer) throws {
@@ -68,11 +74,14 @@ extension Notebook: FetchableRecord, MutablePersistableRecord {
         container["default_page_style"] = defaultPageStyle.rawValue
         container["note_description"] = noteDescription
         container["author"] = author
+        container["last_synced_at"] = lastSyncedAt
+        container["pinned"] = isPinned
     }
 }
 
 // MARK: - Query Helpers
 
 extension Notebook {
-    static let orderByUpdated = Notebook.order(Column("updated_at").desc)
+    /// Pinned first, then most recently updated.
+    static let orderByUpdated = Notebook.order(Column("pinned").desc, Column("updated_at").desc)
 }

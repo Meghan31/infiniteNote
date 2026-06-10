@@ -7,7 +7,13 @@ final class NotebookListViewModel {
     var errorMessage: String?
     var isLoading = false
 
+    // Folders (homepage)
+    var folders: [Folder] = []
+    /// folderId → notebook ids inside it (membership + count cache).
+    var folderMemberships: [String: Set<String>] = [:]
+
     private let service = NotebookService.shared
+    private let folderService = FolderService.shared
 
     // MARK: - Load
 
@@ -15,7 +21,15 @@ final class NotebookListViewModel {
         isLoading = true
         do { notebooks = try service.allNotebooks() }
         catch { errorMessage = error.localizedDescription }
+        loadFolders()
         isLoading = false
+    }
+
+    func loadFolders() {
+        do {
+            folders = try folderService.allFolders()
+            folderMemberships = try folderService.allMemberships()
+        } catch { errorMessage = error.localizedDescription }
     }
 
     // MARK: - Create
@@ -78,6 +92,11 @@ final class NotebookListViewModel {
         do {
             try service.deleteNotebook(notebook)
             notebooks.removeAll { $0.id == notebook.id }
+            // The DB cascade already removed its folder links — mirror that
+            // in the in-memory cache so folder count badges update instantly.
+            for key in folderMemberships.keys {
+                folderMemberships[key]?.remove(notebook.id)
+            }
         } catch { errorMessage = error.localizedDescription }
     }
 
@@ -103,6 +122,154 @@ final class NotebookListViewModel {
             if let idx = notebooks.firstIndex(where: { $0.id == notebook.id }) {
                 notebooks[idx].coverImagePath = "cover.jpg"
             }
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    // MARK: - Pins
+
+    /// Mirrors the DB sort: pinned first, then most recently updated.
+    private func sortNotebooks() {
+        notebooks.sort { lhs, rhs in
+            if lhs.isPinned != rhs.isPinned { return lhs.isPinned }
+            return lhs.updatedAt > rhs.updatedAt
+        }
+    }
+
+    private func sortFolders() {
+        folders.sort { lhs, rhs in
+            if lhs.isPinned != rhs.isPinned { return lhs.isPinned }
+            return lhs.updatedAt > rhs.updatedAt
+        }
+    }
+
+    func togglePin(_ notebook: Notebook) {
+        do {
+            try service.setPinned(!notebook.isPinned, for: notebook)
+            if let idx = notebooks.firstIndex(where: { $0.id == notebook.id }) {
+                notebooks[idx].isPinned.toggle()
+            }
+            sortNotebooks()
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func togglePin(_ folder: Folder) {
+        do {
+            try folderService.setPinned(!folder.isPinned, for: folder)
+            if let idx = folders.firstIndex(where: { $0.id == folder.id }) {
+                folders[idx].isPinned.toggle()
+            }
+            sortFolders()
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    // MARK: - Sync
+
+    /// Reflects a completed cloud sync in the UI immediately.
+    /// (SyncService already stamped the local DB.)
+    func applySyncDate(_ date: Date, to notebook: Notebook) {
+        if let idx = notebooks.firstIndex(where: { $0.id == notebook.id }) {
+            notebooks[idx].lastSyncedAt = date
+        }
+    }
+
+    /// Removes the notebook's cloud copy; the notebook stays local.
+    @MainActor
+    func unsync(_ notebook: Notebook) async {
+        do {
+            try await SyncService.shared.unsyncNotebook(notebook)
+            if let idx = notebooks.firstIndex(where: { $0.id == notebook.id }) {
+                notebooks[idx].lastSyncedAt = nil
+            }
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    /// Delete flow (synced notebook): also remove the cloud copy.
+    @MainActor
+    func deleteAndUnsync(_ notebook: Notebook) async {
+        do {
+            try await SyncService.shared.unsyncNotebook(notebook)
+            deleteNotebook(notebook)
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    /// Delete flow (unsynced notebook): upload a cloud copy first, then
+    /// delete locally. Nothing is deleted if the sync fails.
+    @MainActor
+    func syncThenDeleteLocally(_ notebook: Notebook) async {
+        do {
+            _ = try await SyncService.shared.syncNotebook(notebook)
+            deleteNotebook(notebook)
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    // MARK: - Folders
+
+    func createFolder(name: String, colorIndex: Int, imageData: Data?, author: String?) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        do {
+            let folder = try folderService.createFolder(
+                name: trimmed, colorIndex: colorIndex, imageData: imageData, author: author
+            )
+            folders.insert(folder, at: 0)
+            folderMemberships[folder.id] = []
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func updateFolder(_ folder: Folder, name: String, colorIndex: Int, imageData: Data?, author: String?) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        do {
+            let updated = try folderService.updateFolder(
+                folder, name: trimmed, colorIndex: colorIndex, imageData: imageData, author: author
+            )
+            if let idx = folders.firstIndex(where: { $0.id == folder.id }) {
+                folders[idx] = updated
+            }
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func deleteFolder(_ folder: Folder) {
+        do {
+            try folderService.deleteFolder(folder)
+            folders.removeAll { $0.id == folder.id }
+            folderMemberships[folder.id] = nil
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    /// Notebooks inside `folder` — live from the notebooks array so cards
+    /// stay in sync (renames, covers, deletions).
+    func notebooks(in folder: Folder) -> [Notebook] {
+        let ids = folderMemberships[folder.id] ?? []
+        return notebooks.filter { ids.contains($0.id) }
+    }
+
+    func notebookCount(in folder: Folder) -> Int {
+        folderMemberships[folder.id]?.count ?? 0
+    }
+
+    func isNotebook(_ notebook: Notebook, in folder: Folder) -> Bool {
+        folderMemberships[folder.id]?.contains(notebook.id) ?? false
+    }
+
+    /// Adds or removes the notebook from the folder (one membership max —
+    /// enforced both here and by the join table's primary key).
+    func toggleNotebook(_ notebook: Notebook, in folder: Folder) {
+        do {
+            if isNotebook(notebook, in: folder) {
+                try folderService.removeNotebook(notebook.id, from: folder)
+                folderMemberships[folder.id]?.remove(notebook.id)
+            } else {
+                try folderService.addNotebook(notebook.id, to: folder)
+                folderMemberships[folder.id, default: []].insert(notebook.id)
+            }
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func removeNotebook(_ notebook: Notebook, from folder: Folder) {
+        do {
+            try folderService.removeNotebook(notebook.id, from: folder)
+            folderMemberships[folder.id]?.remove(notebook.id)
         } catch { errorMessage = error.localizedDescription }
     }
 }
