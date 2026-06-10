@@ -4,11 +4,13 @@ import PhotosUI
 // MARK: - Create Notebook Sheet
 
 struct NotebookCreationSheet: View {
-    var onCreate: (String, Int, Data?, PageStyle) -> Void
+    var onCreate: (String, Int, Data?, PageStyle, String?, String?) -> Void
     var onCancel: () -> Void
 
     @EnvironmentObject private var themeManager: ThemeManager
     @State private var title = ""
+    @State private var noteDescription = ""
+    @State private var author = ""
     @State private var coverTab: CoverTab = .color
     @State private var colorIndex: Int = Color.notebookCovers.indices.randomElement() ?? 0
     @State private var photoItem: PhotosPickerItem?
@@ -29,6 +31,19 @@ struct NotebookCreationSheet: View {
                         .font(.system(size: 17))
                         .listRowBackground(themeManager.card)
                 } header: { Text("Notebook Title").foregroundStyle(Color.palmLeaf) }
+
+                // ── Details (all optional — shown on the PDF cover) ───
+                Section {
+                    TextField("Short description", text: $noteDescription, axis: .vertical)
+                        .font(.system(size: 15))
+                        .lineLimit(2...4)
+                        .listRowBackground(themeManager.card)
+                    TextField("Author", text: $author)
+                        .font(.system(size: 15))
+                        .textContentType(.name)
+                        .listRowBackground(themeManager.card)
+                } header: { Text("Details (Optional)").foregroundStyle(Color.palmLeaf) }
+                  footer: { Text("Appears on the cover page when you download the notebook as PDF.") }
 
                 // ── Cover ─────────────────────────────────────────────
                 Section {
@@ -63,7 +78,8 @@ struct NotebookCreationSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Create") {
-                        onCreate(title, colorIndex, photoData, selectedStyle)
+                        onCreate(title, colorIndex, photoData, selectedStyle,
+                                 noteDescription.nilIfBlank, author.nilIfBlank)
                     }
                     .fontWeight(.semibold).foregroundStyle(Color.burgundy)
                     .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -244,6 +260,7 @@ struct EditCoverSheet: View {
     let notebook: Notebook
     var onSaveColor: (Int) -> Void
     var onSavePhoto: (Data) -> Void
+    var onSaveDetails: (String?, String?) -> Void
     var onCancel: () -> Void
 
     @EnvironmentObject private var themeManager: ThemeManager
@@ -252,18 +269,29 @@ struct EditCoverSheet: View {
     @State private var photoItem: PhotosPickerItem?
     @State private var photoData: Data?
     @State private var showFileImporter = false
+    @State private var noteDescription: String
+    @State private var author: String
 
     enum CoverTab { case color, photo }
 
     private let covers = Color.notebookCovers
 
-    init(notebook: Notebook, onSaveColor: @escaping (Int) -> Void, onSavePhoto: @escaping (Data) -> Void, onCancel: @escaping () -> Void) {
+    init(
+        notebook: Notebook,
+        onSaveColor: @escaping (Int) -> Void,
+        onSavePhoto: @escaping (Data) -> Void,
+        onSaveDetails: @escaping (String?, String?) -> Void = { _, _ in },
+        onCancel: @escaping () -> Void
+    ) {
         self.notebook = notebook
         self.onSaveColor = onSaveColor
         self.onSavePhoto = onSavePhoto
+        self.onSaveDetails = onSaveDetails
         self.onCancel = onCancel
         self._colorIndex = State(initialValue: notebook.coverColorIndex)
         self._coverTab = State(initialValue: notebook.coverImagePath != nil ? .photo : .color)
+        self._noteDescription = State(initialValue: notebook.noteDescription ?? "")
+        self._author = State(initialValue: notebook.author ?? "")
     }
 
     var body: some View {
@@ -329,6 +357,19 @@ struct EditCoverSheet: View {
                         .listRowBackground(themeManager.card)
                     }
                 } header: { Text("Cover").foregroundStyle(Color.palmLeaf) }
+
+                // ── Details (all optional — shown on the PDF cover) ───
+                Section {
+                    TextField("Short description", text: $noteDescription, axis: .vertical)
+                        .font(.system(size: 15))
+                        .lineLimit(2...4)
+                        .listRowBackground(themeManager.card)
+                    TextField("Author", text: $author)
+                        .font(.system(size: 15))
+                        .textContentType(.name)
+                        .listRowBackground(themeManager.card)
+                } header: { Text("Details (Optional)").foregroundStyle(Color.palmLeaf) }
+                  footer: { Text("Appears on the cover page when you download the notebook as PDF.") }
             }
             .scrollContentBackground(.hidden)
             .background(themeManager.background)
@@ -340,6 +381,7 @@ struct EditCoverSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
+                        onSaveDetails(noteDescription.nilIfBlank, author.nilIfBlank)
                         if coverTab == .photo, let data = photoData { onSavePhoto(data) }
                         else { onSaveColor(colorIndex) }
                     }
@@ -349,5 +391,16 @@ struct EditCoverSheet: View {
         }
         .themeToggleOverlay()
         .presentationDetents([.medium, .large])
+    }
+}
+
+// MARK: - Small Helpers
+
+extension String {
+    /// `nil` when the string is empty after trimming — used so optional
+    /// cover details are stored as NULL instead of "".
+    var nilIfBlank: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

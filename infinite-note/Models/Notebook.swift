@@ -12,6 +12,10 @@ struct Notebook: Identifiable, Hashable, Sendable {
     var coverImagePath: String?
     /// Default style applied to every new page added to this notebook.
     var defaultPageStyle: PageStyle
+    /// Optional details shown on the exported PDF cover.
+    /// (`noteDescription` to avoid clashing with `CustomStringConvertible`.)
+    var noteDescription: String?
+    var author: String?
 
     init(
         id: String = UUID().uuidString,
@@ -20,7 +24,9 @@ struct Notebook: Identifiable, Hashable, Sendable {
         updatedAt: Date = .now,
         coverColorIndex: Int = Int.random(in: 0...4), // keep in sync with Color.notebookCovers.count
         coverImagePath: String? = nil,
-        defaultPageStyle: PageStyle = .grid
+        defaultPageStyle: PageStyle = .grid,
+        noteDescription: String? = nil,
+        author: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -29,6 +35,8 @@ struct Notebook: Identifiable, Hashable, Sendable {
         self.coverColorIndex = coverColorIndex
         self.coverImagePath = coverImagePath
         self.defaultPageStyle = defaultPageStyle
+        self.noteDescription = noteDescription
+        self.author = author
     }
 }
 
@@ -46,6 +54,8 @@ extension Notebook: FetchableRecord, MutablePersistableRecord {
         coverImagePath = row["cover_image_path"]
         let styleRaw: String = row["default_page_style"] ?? "grid"
         defaultPageStyle = PageStyle(rawValue: styleRaw) ?? .grid
+        noteDescription = row["note_description"]
+        author = row["author"]
     }
 
     func encode(to container: inout PersistenceContainer) throws {
@@ -56,6 +66,8 @@ extension Notebook: FetchableRecord, MutablePersistableRecord {
         container["cover_color_index"] = coverColorIndex
         container["cover_image_path"] = coverImagePath
         container["default_page_style"] = defaultPageStyle.rawValue
+        container["note_description"] = noteDescription
+        container["author"] = author
     }
 }
 

@@ -34,7 +34,7 @@ final class PDFGenerator {
         UIGraphicsBeginPDFContextToData(pdfData, CGRect(origin: .zero, size: pageSize), nil)
 
         // Cover page — always the first page of the exported PDF.
-        drawCoverPage(for: notebook, pageSize: pageSize)
+        drawCoverPage(for: notebook, pageSize: pageSize, pageCount: pages.count)
 
         for page in pages {
             let drawing = try DrawingService.shared.loadDrawing(for: page)
@@ -67,12 +67,14 @@ final class PDFGenerator {
 
     // MARK: - Cover Page
     //
-    // Every exported PDF opens with a cover:
-    //   • The user picked a cover photo (at creation or via Edit Cover)
-    //     → that photo, full-bleed, nothing on top.
-    //   • No photo → the bundled "background" cover art with the notebook
-    //     title on a cartoon plate (cream card + ink outline + hard shadow),
-    //     since the same art is shared by every notebook.
+    // Every exported PDF opens with a full cover:
+    //   • Cover art: the user's cover photo if one was picked (at creation or
+    //     via Edit Cover); otherwise the bundled artworks "background 1"…
+    //     "background 10", cycled by notebook creation order (11th notebook
+    //     wraps back to "background 1").
+    //   • Text layout (drawn on BOTH photo and default covers), all on cartoon
+    //     plates: very big title, optional description, optional author, then
+    //     page count, created/downloaded dates, and links at the bottom.
 
     /// Light-theme cartoon ink colors, mirrored from Color+Extensions.
     private enum CoverPalette {
@@ -80,9 +82,15 @@ final class PDFGenerator {
         static let cream = UIColor(red: 0xFF / 255, green: 0xF7 / 255, blue: 0xE9 / 255, alpha: 1) // themeBackgroundLight
     }
 
-    private func drawCoverPage(for notebook: Notebook, pageSize: CGSize) {
+    /// Number of bundled "background N" cover artworks in Assets.xcassets.
+    private let defaultCoverArtCount = 10
+
+    /// Footer links shown at the bottom of every cover.
+    private let coverLinks = "www.meghan31.me   ·   linkedin.com/in/meghan31   ·   github.com/Meghan31"
+
+    private func drawCoverPage(for notebook: Notebook, pageSize: CGSize, pageCount: Int) {
         let userCover = FileStorageManager.shared.loadCoverImage(notebookId: notebook.id)
-        let coverImage = userCover ?? UIImage(named: "background")
+        let coverImage = userCover ?? defaultCoverArt(for: notebook)
 
         UIGraphicsBeginPDFPageWithInfo(CGRect(origin: .zero, size: pageSize), nil)
         guard let ctx = UIGraphicsGetCurrentContext() else { return }
@@ -95,10 +103,16 @@ final class PDFGenerator {
             drawAspectFill(coverImage, in: ctx, pageSize: pageSize)
         }
 
-        // Shared default art → add the title so covers stay distinguishable.
-        if userCover == nil {
-            drawTitlePlate(notebook.title, in: ctx, pageSize: pageSize)
-        }
+        drawCoverTexts(for: notebook, pageCount: pageCount, in: ctx, pageSize: pageSize)
+    }
+
+    /// "background 1"…"background 10", assigned by creation order and cycling
+    /// back to 1 after 10.
+    private func defaultCoverArt(for notebook: Notebook) -> UIImage? {
+        let index = NotebookService.shared.creationOrderIndex(of: notebook)
+        let assetNumber = (index % defaultCoverArtCount) + 1
+        return UIImage(named: "background \(assetNumber)")
+            ?? UIImage(named: "background") // legacy single-art fallback
     }
 
     /// Draws `image` scaled to completely fill the page (centered, edges
@@ -115,19 +129,95 @@ final class PDFGenerator {
         ctx.restoreGState()
     }
 
-    /// The notebook title on a cartoon "sticker" plate: cream fill, heavy ink
-    /// outline, hard offset shadow — the app's design language, in print.
-    private func drawTitlePlate(_ title: String, in ctx: CGContext, pageSize: CGSize) {
-        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+    /// Lays out all cover texts, using the whole page:
+    ///
+    ///   top    → TITLE (very big) → description → "by author"
+    ///   bottom → page count ← dates ← links (anchored upward from the edge)
+    private func drawCoverTexts(for notebook: Notebook, pageCount: Int, in ctx: CGContext, pageSize: CGSize) {
+        let w = pageSize.width
+        let h = pageSize.height
 
-        // Rounded heavy font ≈ the app's `.cartoon` face.
-        let fontSize = max(28, pageSize.width * 0.062)
-        var font = UIFont.systemFont(ofSize: fontSize, weight: .heavy)
-        if let rounded = font.fontDescriptor.withDesign(.rounded) {
-            font = UIFont(descriptor: rounded, size: fontSize)
+        // ── Top-down: title, description, author ─────────────────────
+        var cursorY = h * 0.075
+
+        let title = notebook.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty {
+            let rect = drawCoverPlate(
+                title,
+                font: roundedFont(size: w * 0.095, weight: .heavy),
+                in: ctx, pageSize: pageSize,
+                topY: cursorY, maxWidthFraction: 0.86, maxLines: 3
+            )
+            cursorY = rect.maxY + h * 0.028
         }
 
+        if let description = notebook.noteDescription?.nilIfBlank {
+            let rect = drawCoverPlate(
+                description,
+                font: roundedFont(size: w * 0.028, weight: .medium),
+                in: ctx, pageSize: pageSize,
+                topY: cursorY, maxWidthFraction: 0.74, maxLines: 5
+            )
+            cursorY = rect.maxY + h * 0.020
+        }
+
+        if let author = notebook.author?.nilIfBlank {
+            drawCoverPlate(
+                "by \(author)",
+                font: roundedFont(size: w * 0.032, weight: .bold),
+                in: ctx, pageSize: pageSize,
+                topY: cursorY, maxWidthFraction: 0.70, maxLines: 1
+            )
+        }
+
+        // ── Bottom-up: links, dates, page count ──────────────────────
+        let linksRect = drawCoverPlate(
+            coverLinks,
+            font: roundedFont(size: w * 0.0165, weight: .semibold),
+            in: ctx, pageSize: pageSize,
+            bottomMaxY: h * 0.972, maxWidthFraction: 0.94, maxLines: 1
+        )
+
+        let dateStyle: Date.FormatStyle = .dateTime.day().month(.abbreviated).year()
+        let created = notebook.createdAt.formatted(dateStyle)
+        let downloaded = Date.now.formatted(dateStyle)
+        let datesRect = drawCoverPlate(
+            "Created \(created)   •   Downloaded \(downloaded)",
+            font: roundedFont(size: w * 0.0225, weight: .bold),
+            in: ctx, pageSize: pageSize,
+            bottomMaxY: linksRect.minY - h * 0.015, maxWidthFraction: 0.90, maxLines: 1
+        )
+
+        drawCoverPlate(
+            "\(pageCount) \(pageCount == 1 ? "page" : "pages")",
+            font: roundedFont(size: w * 0.021, weight: .heavy),
+            in: ctx, pageSize: pageSize,
+            bottomMaxY: datesRect.minY - h * 0.015, maxWidthFraction: 0.5, maxLines: 1
+        )
+    }
+
+    /// Rounded system font ≈ the app's `.cartoon` face.
+    private func roundedFont(size: CGFloat, weight: UIFont.Weight) -> UIFont {
+        let base = UIFont.systemFont(ofSize: size, weight: weight)
+        guard let rounded = base.fontDescriptor.withDesign(.rounded) else { return base }
+        return UIFont(descriptor: rounded, size: size)
+    }
+
+    /// Draws `text` centered on a cartoon "sticker" plate (cream fill, heavy
+    /// ink outline, hard offset shadow), horizontally centered on the page.
+    /// Anchor with either `topY` (plate top) or `bottomMaxY` (plate bottom).
+    /// Returns the plate's frame so callers can stack blocks.
+    @discardableResult
+    private func drawCoverPlate(
+        _ text: String,
+        font: UIFont,
+        in ctx: CGContext,
+        pageSize: CGSize,
+        topY: CGFloat? = nil,
+        bottomMaxY: CGFloat? = nil,
+        maxWidthFraction: CGFloat = 0.78,
+        maxLines: CGFloat = 3
+    ) -> CGRect {
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
         paragraph.lineBreakMode = .byWordWrapping
@@ -137,61 +227,70 @@ final class PDFGenerator {
             .paragraphStyle: paragraph
         ]
 
-        // Wrap the title inside the plate; cap the plate height at 3-ish lines.
-        let maxTextWidth = pageSize.width * 0.58
-        let maxTextHeight = font.lineHeight * 3.4
-        let measured = (trimmed as NSString).boundingRect(
+        let padX = font.pointSize * 0.85
+        let padY = font.pointSize * 0.55
+
+        // Measure, wrapping inside the plate and capping the line count.
+        let maxTextWidth = pageSize.width * maxWidthFraction - padX * 2
+        let maxTextHeight = font.lineHeight * maxLines + 2
+        let measured = (text as NSString).boundingRect(
             with: CGSize(width: maxTextWidth, height: maxTextHeight),
             options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
             attributes: attrs,
             context: nil
         )
+        let textSize = CGSize(width: ceil(measured.width),
+                              height: min(ceil(measured.height), ceil(maxTextHeight)))
 
-        let padX = fontSize * 0.85
-        let padY = fontSize * 0.62
-        let plateSize = CGSize(width: ceil(measured.width) + padX * 2,
-                               height: ceil(measured.height) + padY * 2)
-        // Centered horizontally, sitting a bit above center — classic cover layout.
-        let plateOrigin = CGPoint(x: (pageSize.width - plateSize.width) / 2,
-                                  y: pageSize.height * 0.40 - plateSize.height / 2)
-        let plateRect = CGRect(origin: plateOrigin, size: plateSize)
+        let plateSize = CGSize(width: textSize.width + padX * 2,
+                               height: textSize.height + padY * 2)
+        let x = (pageSize.width - plateSize.width) / 2
+        let y: CGFloat
+        if let topY {
+            y = topY
+        } else if let bottomMaxY {
+            y = bottomMaxY - plateSize.height
+        } else {
+            y = (pageSize.height - plateSize.height) / 2
+        }
+        let plateRect = CGRect(origin: CGPoint(x: x, y: y), size: plateSize)
 
-        let cornerRadius = fontSize * 0.55
-        let outlineWidth = max(3, fontSize * 0.085)
-        let shadowOffset = fontSize * 0.22
+        let cornerRadius = min(plateSize.height / 2.4, font.pointSize * 0.62)
+        let outlineWidth = max(2.5, min(9, font.pointSize * 0.085))
+        let shadowOffset = max(4, min(15, font.pointSize * 0.17))
 
         // Hard offset shadow (blur-free, solid ink) behind the plate.
-        let shadowPath = UIBezierPath(
+        ctx.setFillColor(CoverPalette.ink.withAlphaComponent(0.9).cgColor)
+        ctx.addPath(UIBezierPath(
             roundedRect: plateRect.offsetBy(dx: shadowOffset, dy: shadowOffset),
             cornerRadius: cornerRadius
-        )
-        ctx.setFillColor(CoverPalette.ink.withAlphaComponent(0.9).cgColor)
-        ctx.addPath(shadowPath.cgPath)
+        ).cgPath)
         ctx.fillPath()
 
         // Cream plate + heavy ink outline.
-        let platePath = UIBezierPath(roundedRect: plateRect, cornerRadius: cornerRadius)
+        let platePath = UIBezierPath(roundedRect: plateRect, cornerRadius: cornerRadius).cgPath
         ctx.setFillColor(CoverPalette.cream.cgColor)
-        ctx.addPath(platePath.cgPath)
+        ctx.addPath(platePath)
         ctx.fillPath()
         ctx.setStrokeColor(CoverPalette.ink.cgColor)
         ctx.setLineWidth(outlineWidth)
-        ctx.addPath(platePath.cgPath)
+        ctx.addPath(platePath)
         ctx.strokePath()
 
-        // Title, centered on the plate.
+        // Text, centered on the plate.
         let textRect = CGRect(
             x: plateRect.minX + padX,
-            y: plateRect.minY + (plateSize.height - measured.height) / 2,
+            y: plateRect.minY + (plateSize.height - textSize.height) / 2,
             width: plateSize.width - padX * 2,
-            height: measured.height
+            height: textSize.height
         )
-        (trimmed as NSString).draw(
+        (text as NSString).draw(
             with: textRect,
             options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
             attributes: attrs,
             context: nil
         )
+        return plateRect
     }
 
     // MARK: - Sizing

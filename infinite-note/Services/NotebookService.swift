@@ -21,13 +21,17 @@ final class NotebookService: @unchecked Sendable {
         title: String,
         coverColorIndex: Int = Int.random(in: 0...7),
         coverImageData: Data? = nil,
-        defaultPageStyle: PageStyle = .grid
+        defaultPageStyle: PageStyle = .grid,
+        description: String? = nil,
+        author: String? = nil
     ) throws -> Notebook {
         var notebook = Notebook(
             title: title,
             coverColorIndex: coverColorIndex,
             coverImagePath: coverImageData != nil ? "cover.jpg" : nil,
-            defaultPageStyle: defaultPageStyle
+            defaultPageStyle: defaultPageStyle,
+            noteDescription: description,
+            author: author
         )
         try db.dbQueue.write { db in try notebook.insert(db) }
         if let data = coverImageData {
@@ -52,6 +56,24 @@ final class NotebookService: @unchecked Sendable {
     func touchNotebook(_ notebook: Notebook) throws {
         var updated = notebook; updated.updatedAt = .now
         try db.dbQueue.write { db in try updated.update(db) }
+    }
+
+    /// Updates the optional PDF-cover details (description / author).
+    func updateDetails(description: String?, author: String?, for notebook: Notebook) throws {
+        var updated = notebook
+        updated.noteDescription = description
+        updated.author = author
+        updated.updatedAt = .now
+        try db.dbQueue.write { db in try updated.update(db) }
+    }
+
+    /// 0-based position of `notebook` in creation order (oldest = 0).
+    /// Drives the cycling default PDF cover art ("background 1"…"background 10").
+    func creationOrderIndex(of notebook: Notebook) -> Int {
+        let ids = (try? db.dbQueue.read { db in
+            try String.fetchAll(db, sql: "SELECT id FROM notebooks ORDER BY created_at ASC, id ASC")
+        }) ?? []
+        return ids.firstIndex(of: notebook.id) ?? 0
     }
 
     // MARK: - Cover

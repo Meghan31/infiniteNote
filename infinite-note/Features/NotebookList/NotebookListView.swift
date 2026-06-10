@@ -64,13 +64,15 @@ struct NotebookListView: View {
         .onAppear { viewModel.loadNotebooks() }
         // Create sheet — uses proper View struct so @State works
         .sheet(isPresented: $showCreateSheet) {
-            NotebookCreationSheet { title, colorIndex, photoData, style in
+            NotebookCreationSheet { title, colorIndex, photoData, style, description, author in
                 withAnimation(.easeOut(duration: 0.2)) {
                     viewModel.createNotebook(
                         title: title,
                         coverColorIndex: colorIndex,
                         coverImageData: photoData,
-                        defaultPageStyle: style
+                        defaultPageStyle: style,
+                        description: description,
+                        author: author
                     )
                 }
                 showCreateSheet = false
@@ -84,6 +86,7 @@ struct NotebookListView: View {
                 notebook: nb,
                 onSaveColor: { colorIndex in viewModel.updateCoverColor(colorIndex, for: nb); notebookToEditCover = nil },
                 onSavePhoto: { data in viewModel.updateCoverImage(data, for: nb); notebookToEditCover = nil },
+                onSaveDetails: { description, author in viewModel.updateDetails(description: description, author: author, for: nb) },
                 onCancel: { notebookToEditCover = nil }
             )
         }

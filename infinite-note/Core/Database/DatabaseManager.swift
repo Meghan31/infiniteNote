@@ -56,6 +56,14 @@ final class DatabaseManager: @unchecked Sendable {
             }
         }
 
+        // v4 — optional details for the PDF cover page
+        migrator.registerMigration("v4_cover_details") { db in
+            try db.alter(table: "notebooks") { t in
+                t.add(column: "note_description", .text)
+                t.add(column: "author", .text)
+            }
+        }
+
         try migrator.migrate(dbQueue)
     }
 }

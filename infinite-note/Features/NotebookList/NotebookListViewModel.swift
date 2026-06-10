@@ -24,7 +24,9 @@ final class NotebookListViewModel {
         title: String,
         coverColorIndex: Int = Int.random(in: 0...7),
         coverImageData: Data? = nil,
-        defaultPageStyle: PageStyle = .grid
+        defaultPageStyle: PageStyle = .grid,
+        description: String? = nil,
+        author: String? = nil
     ) {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -33,12 +35,27 @@ final class NotebookListViewModel {
                 title: trimmed,
                 coverColorIndex: coverColorIndex,
                 coverImageData: coverImageData,
-                defaultPageStyle: defaultPageStyle
+                defaultPageStyle: defaultPageStyle,
+                description: description,
+                author: author
             )
             notebooks.insert(notebook, at: 0)
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    // MARK: - Details (PDF cover)
+
+    func updateDetails(description: String?, author: String?, for notebook: Notebook) {
+        do {
+            try service.updateDetails(description: description, author: author, for: notebook)
+            if let idx = notebooks.firstIndex(where: { $0.id == notebook.id }) {
+                notebooks[idx].noteDescription = description
+                notebooks[idx].author = author
+                notebooks[idx].updatedAt = .now
+            }
+        } catch { errorMessage = error.localizedDescription }
     }
 
     // MARK: - Rename
