@@ -97,7 +97,7 @@ final class FolderService: @unchecked Sendable {
     /// Deletes the folder and its links — never the notebooks themselves.
     func deleteFolder(_ folder: Folder) throws {
         storage.deleteFolderFiles(folderId: folder.id)
-        try db.dbQueue.write { db in try folder.delete(db) }
+        try db.dbQueue.write { db in _ = try folder.delete(db) }
     }
 
     // MARK: - Membership

@@ -32,7 +32,7 @@ final class DrawingService: @unchecked Sendable {
     func deletePage(_ page: Page) throws {
         try storage.deleteDrawing(notebookId: page.notebookId, pageId: page.id)
         storage.deletePageBackground(notebookId: page.notebookId, pageId: page.id)
-        try db.dbQueue.write { db in try page.delete(db) }
+        try db.dbQueue.write { db in _ = try page.delete(db) }
         var remaining = try pages(for: page.notebookId)
         try db.dbQueue.write { db in
             for index in remaining.indices {

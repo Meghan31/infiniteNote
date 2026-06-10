@@ -154,6 +154,12 @@ struct NotebookCreationSheet: View {
 
     private var pageStyleGrid: some View {
         let styles: [PageStyle] = [.plain, .ruled, .dots, .grid]
+        // PhotosPicker's label closure is nonisolated, so the @MainActor
+        // ThemeManager can't be touched inside it — capture the (Sendable)
+        // Color values here on the main actor instead.
+        let secondary = themeManager.textSecondary
+        let cardFill = themeManager.card
+        let borderColor = themeManager.border
         return VStack(spacing: 12) {
             // 4 style cards in a row
             HStack(spacing: 10) {
@@ -168,10 +174,10 @@ struct NotebookCreationSheet: View {
                 set: { item in
                     guard let item else { return }
                     Task {
-                        if let data = try? await item.loadTransferable(type: Data.self) {
-                            // Store photo bg data somewhere — for now just mark style as .photo
-                            // The actual bg will be set after creation via setPageStyle
-                            // For simplicity, just select .photo style
+                        if (try? await item.loadTransferable(type: Data.self)) != nil {
+                            // The photo loads OK — just mark the style as
+                            // .photo; the actual background is set after
+                            // creation via setPageStyle.
                             selectedStyle = .photo
                         }
                     }
@@ -181,7 +187,7 @@ struct NotebookCreationSheet: View {
                     Image(systemName: "photo").font(.system(size: 14)).foregroundStyle(Color.palmLeaf)
                     Text("Photo Background")
                         .font(.system(size: 13, weight: selectedStyle == .photo ? .semibold : .regular))
-                        .foregroundStyle(selectedStyle == .photo ? Color.burgundy : themeManager.textSecondary)
+                        .foregroundStyle(selectedStyle == .photo ? Color.burgundy : secondary)
                     Spacer()
                     if selectedStyle == .photo {
                         Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.burgundy)
@@ -189,9 +195,9 @@ struct NotebookCreationSheet: View {
                 }
                 .padding(10)
                 .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(selectedStyle == .photo ? Color.palmLeafDark.opacity(0.15) : themeManager.card)
+                    .fill(selectedStyle == .photo ? Color.palmLeafDark.opacity(0.15) : cardFill)
                     .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .strokeBorder(selectedStyle == .photo ? Color.burgundy.opacity(0.4) : themeManager.border, lineWidth: selectedStyle == .photo ? 1.5 : 0.5)))
+                        .strokeBorder(selectedStyle == .photo ? Color.burgundy.opacity(0.4) : borderColor, lineWidth: selectedStyle == .photo ? 1.5 : 0.5)))
             }
             .buttonStyle(.plain)
         }

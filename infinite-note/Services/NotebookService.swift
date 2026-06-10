@@ -50,7 +50,7 @@ final class NotebookService: @unchecked Sendable {
 
     func deleteNotebook(_ notebook: Notebook) throws {
         try storage.deleteNotebookFiles(notebookId: notebook.id)
-        try db.dbQueue.write { db in try notebook.delete(db) }
+        try db.dbQueue.write { db in _ = try notebook.delete(db) }
     }
 
     func touchNotebook(_ notebook: Notebook) throws {

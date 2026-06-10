@@ -32,9 +32,7 @@
 		76D7FAEF2FCE936D0059D699 /* infinite-note.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "infinite-note.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		76D7FAFC2FCE936E0059D699 /* infinite-noteTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "infinite-noteTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		76D7FB062FCE936E0059D699 /* infinite-noteUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "infinite-noteUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
-		76D7FB592FCE95220059D699 /* prd.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = prd.md; sourceTree = "<group>"; };
 		76D7FB5B2FCE95380059D699 /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
-		76D7FD532FCEA7730059D699 /* done-not_done.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "done-not_done.md"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -85,9 +83,7 @@
 		76D7FAE62FCE936D0059D699 = {
 			isa = PBXGroup;
 			children = (
-				76D7FD532FCEA7730059D699 /* done-not_done.md */,
 				76D7FB5B2FCE95380059D699 /* .gitignore */,
-				76D7FB592FCE95220059D699 /* prd.md */,
 				76D7FAF12FCE936D0059D699 /* infinite-note */,
 				76D7FAFF2FCE936E0059D699 /* infinite-noteTests */,
 				76D7FB092FCE936E0059D699 /* infinite-noteUITests */,

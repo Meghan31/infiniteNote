@@ -24,6 +24,11 @@ struct NotebookEditorView: View {
     /// button over the canvas.
     @State private var isFocusMode = false
 
+    /// Both write-only and read-only are full-screen "immersive" modes: all
+    /// chrome (tab bar, toolbar, nav/status bar, sidebar, footer) hides and a
+    /// floating corner button is the only way out.
+    private var isImmersive: Bool { isFocusMode || isReadOnly }
+
     // Drawing tool state
     @State private var selectedTool: DrawingToolType = .pen
     /// Default ink is black. PencilKit renders it black on a white (light)
@@ -105,7 +110,7 @@ struct NotebookEditorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if !isFocusMode {
+            if !isImmersive {
                 fileTabBar
                     .transition(.move(edge: .top).combined(with: .opacity))
 
@@ -115,24 +120,41 @@ struct NotebookEditorView: View {
             }
 
             HStack(spacing: 0) {
-                if showPageSidebar && !isFocusMode {
+                if showPageSidebar && !isImmersive {
                     pageSidebar
                         .transition(.move(edge: .leading).combined(with: .opacity))
                 }
 
                 ZStack(alignment: .leading) {
                     paperCanvas
-                    if !isFocusMode { pageFooter }
+                    if !isImmersive { pageFooter }
                     if let hint = pageHintText {
                         pageHintBubble(hint)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                             .allowsHitTesting(false)
                             .transition(.scale(scale: 0.85).combined(with: .opacity))
                     }
+                    // Write-only extras: draggable tool + color switches, exit.
                     if isFocusMode {
-                        focusExitButton
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                            .transition(.scale(scale: 0.8).combined(with: .opacity))
+                        FocusToolSwitch(selectedTool: $selectedTool)
+                            .transition(.opacity)
+                        FocusColorSwitch(color: $selectedColor, presets: presetColors)
+                            .transition(.opacity)
+                        floatingExitButton(
+                            icon: "arrow.down.right.and.arrow.up.left",
+                            label: "Exit write-only mode"
+                        ) {
+                            withAnimation(.easeOut(duration: 0.25)) { isFocusMode = false }
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .transition(.scale(scale: 0.8).combined(with: .opacity))
+                    } else if isReadOnly {
+                        // Full-screen reading: the floating eye exits.
+                        floatingExitButton(icon: "eye.fill", label: "Exit read-only mode") {
+                            withAnimation(.easeOut(duration: 0.25)) { isReadOnly = false }
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .transition(.scale(scale: 0.8).combined(with: .opacity))
                     }
                 }
             }
@@ -143,9 +165,10 @@ struct NotebookEditorView: View {
         .navigationBarBackButtonHidden(true)
         .toolbar { editorToolbar }
         .toolbar(removing: .sidebarToggle)
-        // Write-only mode: navigation bar and status bar go away too.
-        .toolbar(isFocusMode ? .hidden : .visible, for: .navigationBar)
-        .statusBarHidden(isFocusMode)
+        // Immersive (write-only / read-only) modes: navigation bar and
+        // status bar go away too.
+        .toolbar(isImmersive ? .hidden : .visible, for: .navigationBar)
+        .statusBarHidden(isImmersive)
         .background(SidebarToggleHider().frame(width: 0, height: 0))
         .onAppear { viewModel.load() }
         .onDisappear { viewModel.saveCurrentDrawing() }
@@ -214,7 +237,8 @@ struct NotebookEditorView: View {
                             systemName: "house.fill",
                             size: 30,
                             fallbackTint: themeManager.iconTint,
-                            symbolWeight: .bold
+                            symbolWeight: .bold,
+                            addsDepth: false   // flat home icon — no shadow
                         )
                         .frame(width: 40, height: 40)
                         .contentShape(Rectangle())
@@ -271,24 +295,14 @@ struct NotebookEditorView: View {
     // MARK: - Drawing Toolbar
 
     private var drawingToolbar: some View {
+        // Read-only is now full-screen (the whole bar hides via `isImmersive`),
+        // so the bar only ever shows the editing row.
         VStack(spacing: 0) {
-            if isReadOnly {
-                // Read-only: everything in this bar is hidden except the
-                // read-mode icon, which exits back to editing.
-                HStack(spacing: 0) {
-                    Spacer(minLength: 0)
-                    readOnlyToggleButton.padding(.trailing, 4)
-                }
-                .frame(height: 62)
-                .background(themeManager.card)
-            } else {
-                editingToolbarRow
-            }
+            editingToolbarRow
 
             // Heavy ink rule under the bar — it sits at the top of the page now.
             Rectangle().fill(themeManager.outline).frame(height: 2)
         }
-        .animation(.easeOut(duration: 0.2), value: isReadOnly)
     }
 
     private var editingToolbarRow: some View {
@@ -406,12 +420,15 @@ struct NotebookEditorView: View {
         .accessibilityLabel("Write-only mode")
     }
 
-    /// Floating exit for write-only mode — the only chrome left on screen.
-    private var focusExitButton: some View {
-        Button {
-            withAnimation(.easeOut(duration: 0.25)) { isFocusMode = false }
-        } label: {
-            Image(systemName: "arrow.down.right.and.arrow.up.left")
+    /// Floating corner exit for immersive (write-only / read-only) modes —
+    /// the only chrome left on screen.
+    private func floatingExitButton(
+        icon: String,
+        label: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
                 .font(.system(size: 14, weight: .heavy))
                 .foregroundStyle(themeManager.iconTint)
                 .frame(width: 40, height: 40)
@@ -426,15 +443,21 @@ struct NotebookEditorView: View {
         }
         .buttonStyle(.plain)
         .padding(12)
-        .accessibilityLabel("Exit write-only mode")
+        .accessibilityLabel(label)
     }
 
     // MARK: - Page Style Popover
 
     private var pageStylePopover: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        // PhotosPicker's label closure is nonisolated, so the @MainActor
+        // ThemeManager can't be touched inside it — capture the (Sendable)
+        // Color values here on the main actor instead.
+        let tint = themeManager.iconTint
+        let selection = themeManager.selectionColor
+        let isPhotoStyle = viewModel.currentPageStyle == .photo
+        return VStack(alignment: .leading, spacing: 14) {
             Text("Page Style")
-                .font(.cartoon(14, weight: .heavy)).foregroundStyle(themeManager.iconTint)
+                .font(.cartoon(14, weight: .heavy)).foregroundStyle(tint)
             let nonPhotoStyles: [PageStyle] = [.plain, .ruled, .dots, .grid]
             let cols = Array(repeating: GridItem(.flexible(), spacing: 10), count: 2)
             LazyVGrid(columns: cols, spacing: 10) {
@@ -443,19 +466,19 @@ struct NotebookEditorView: View {
             Divider()
             PhotosPicker(selection: $pageStylePhotoItem, matching: .images, photoLibrary: .shared()) {
                 HStack(spacing: 10) {
-                    Image(systemName: "photo").font(.system(size: 15, weight: .semibold)).foregroundStyle(themeManager.iconTint)
+                    Image(systemName: "photo").font(.system(size: 15, weight: .semibold)).foregroundStyle(tint)
                     Text("Import Photo as Background")
-                        .font(.cartoon(13, weight: .semibold)).foregroundStyle(themeManager.iconTint)
+                        .font(.cartoon(13, weight: .semibold)).foregroundStyle(tint)
                     Spacer()
-                    if viewModel.currentPageStyle == .photo {
-                        Image(systemName: "checkmark.circle.fill").foregroundStyle(themeManager.iconTint)
+                    if isPhotoStyle {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(tint)
                     }
                 }
                 .padding(12)
                 .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(themeManager.selectionColor.opacity(0.18))
+                    .fill(selection.opacity(0.18))
                     .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(viewModel.currentPageStyle == .photo ? themeManager.selectionColor : Color.clear, lineWidth: 2)))
+                        .strokeBorder(isPhotoStyle ? selection : Color.clear, lineWidth: 2)))
             }
             .buttonStyle(.plain)
             .onChange(of: pageStylePhotoItem) { _, _ in showStylePicker = false }
@@ -573,6 +596,9 @@ struct NotebookEditorView: View {
             ZStack {
                 // Notebook page — pure white (light) / pure black (dark)
                 themeManager.page
+                // Page decorations (grid / ruled / dots / photo) dim while
+                // reading so the background never competes with the ink.
+                Group {
                 if viewModel.currentPageStyle == .photo, let img = viewModel.pageBackgroundImage {
                     Image(uiImage: img).resizable().scaledToFill()
                         .frame(width: geo.size.width, height: geo.size.height)
@@ -625,6 +651,9 @@ struct NotebookEditorView: View {
                     }
                     .frame(width: geo.size.width, height: geo.size.height)
                 }
+                }
+                .opacity(isReadOnly ? 0.25 : 1)
+                .animation(.easeOut(duration: 0.25), value: isReadOnly)
             }
         }
     }
@@ -1085,6 +1114,214 @@ struct NotebookEditorView: View {
     private func sharePDF() {
         guard let url = makeNotebookPDF() else { return }
         sharePDFItem = SharePDFItem(url: url)
+    }
+}
+
+// MARK: - Write-Only Floating Controls
+//
+// Write-only mode keeps the screen empty except for the exit button and two
+// small DRAGGABLE controls (strictly focus-mode-only — they exist in the view
+// tree only while `isFocusMode` is true):
+//
+//   • FocusColorSwitch — a circle showing the current ink color. Tapping it
+//     opens a popover with the full preset palette plus the system color
+//     wheel ("More Colors"), mirroring the toolbar's color popover.
+//   • FocusToolSwitch — a circle showing ONLY the selected pen. Tapping it
+//     extends an inline toolkit with every tool in a fixed, stable order;
+//     picking one collapses the kit back to the circle.
+
+private struct FocusColorSwitch: View {
+    @Binding var color: Color
+    let presets: [Color]
+
+    @EnvironmentObject private var themeManager: ThemeManager
+    /// Current centre in the canvas-area coordinate space; nil = resting spot
+    /// (bottom-leading corner) until the first drag.
+    @State private var position: CGPoint?
+    @State private var showPalette = false
+
+    private let diameter: CGFloat = 46
+
+    var body: some View {
+        GeometryReader { geo in
+            let resting = CGPoint(x: 16 + diameter / 2,
+                                  y: geo.size.height - 26 - diameter / 2)
+            ZStack {
+                // Cartoon hard shadow, fill, ink outline.
+                Circle().fill(themeManager.hardShadow.opacity(0.45)).offset(x: 2.5, y: 3)
+                Circle().fill(color)
+                Circle().strokeBorder(themeManager.outline, lineWidth: 2.5)
+            }
+            .frame(width: diameter, height: diameter)
+            .contentShape(Circle().inset(by: -10))   // generous touch target
+            .onTapGesture { showPalette = true }
+            .popover(isPresented: $showPalette,
+                     attachmentAnchor: .rect(.bounds),
+                     arrowEdge: .top) { palette }
+            .position(position ?? resting)
+            .gesture(
+                DragGesture(minimumDistance: 4)
+                    .onChanged { value in
+                        position = clamp(value.location, in: geo.size)
+                    }
+            )
+            .accessibilityLabel("Pen color")
+        }
+    }
+
+    /// Preset swatches + the system color wheel — write-only mode loses
+    /// nothing over the toolbar's color popover.
+    private var palette: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Color").font(.cartoon(14, weight: .heavy)).foregroundStyle(themeManager.iconTint)
+            let cols = Array(repeating: GridItem(.fixed(40), spacing: 10), count: 5)
+            LazyVGrid(columns: cols, spacing: 12) {
+                ForEach(presets.indices, id: \.self) { i in
+                    Button {
+                        color = presets[i]
+                        showPalette = false
+                    } label: {
+                        ZStack {
+                            Circle().fill(presets[i]).frame(width: 34, height: 34)
+                            Circle().strokeBorder(themeManager.outline, lineWidth: 2).frame(width: 34, height: 34)
+                            if color == presets[i] {
+                                Circle().strokeBorder(themeManager.selectionColor, lineWidth: 3).frame(width: 40, height: 40)
+                            }
+                        }
+                        .frame(width: 40, height: 40)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            Divider()
+            // Full system palette (wheel / sliders / grid).
+            ColorPicker(selection: $color, supportsOpacity: false) {
+                HStack(spacing: 8) {
+                    Image(systemName: "paintpalette.fill").foregroundStyle(themeManager.iconTint)
+                    Text("More Colors").font(.cartoon(14, weight: .bold)).foregroundStyle(themeManager.textPrimary)
+                }
+            }
+        }
+        .padding(16)
+        .frame(width: 268)
+        .modifier(ForcePopoverAdaptation())
+    }
+
+    /// Keeps the circle fully on screen while dragging.
+    private func clamp(_ p: CGPoint, in size: CGSize) -> CGPoint {
+        let r = diameter / 2 + 6
+        return CGPoint(
+            x: min(max(p.x, r), size.width - r),
+            y: min(max(p.y, r), size.height - r)
+        )
+    }
+}
+
+private struct FocusToolSwitch: View {
+    @Binding var selectedTool: DrawingToolType
+
+    @EnvironmentObject private var themeManager: ThemeManager
+    /// Current centre in the canvas-area coordinate space; nil = resting spot
+    /// (just above the color circle) until the first drag.
+    @State private var position: CGPoint?
+    @State private var isExtended = false
+
+    private let diameter: CGFloat = 46
+    /// Fixed, stable order — the kit always extends the same way.
+    private let tools = DrawingToolType.allCases
+
+    var body: some View {
+        GeometryReader { geo in
+            let resting = CGPoint(x: 16 + diameter / 2,
+                                  y: geo.size.height - 26 - diameter / 2 - 64)
+            content
+                // Re-clamped on extension so the wide kit never leaves the screen.
+                .position(clamped(position ?? resting, in: geo.size))
+                .gesture(
+                    DragGesture(minimumDistance: 4)
+                        .onChanged { value in
+                            position = clamped(value.location, in: geo.size)
+                        }
+                )
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if isExtended {
+            // The full pen set — always the same order.
+            HStack(spacing: 4) {
+                ForEach(tools, id: \.self) { tool in
+                    Button {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                            selectedTool = tool
+                            isExtended = false
+                        }
+                    } label: {
+                        glyph(tool)
+                            .frame(width: 39, height: 39)
+                            .background(Circle().fill(tool == selectedTool ? themeManager.selectionColor : Color.clear))
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(tool.label)
+                }
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(Capsule(style: .continuous).fill(themeManager.card))
+            .overlay(Capsule(style: .continuous).strokeBorder(themeManager.outline, lineWidth: 2))
+            .background(
+                Capsule(style: .continuous)
+                    .fill(themeManager.hardShadow.opacity(0.45))
+                    .offset(x: 2.5, y: 3)
+            )
+            .transition(.scale(scale: 0.55).combined(with: .opacity))
+        } else {
+            // Collapsed: only the SELECTED pen shows in the circle.
+            ZStack {
+                Circle().fill(themeManager.hardShadow.opacity(0.45)).offset(x: 2.5, y: 3)
+                Circle().fill(themeManager.card)
+                Circle().strokeBorder(themeManager.outline, lineWidth: 2.5)
+                glyph(selectedTool)
+            }
+            .frame(width: diameter, height: diameter)
+            .contentShape(Circle().inset(by: -10))
+            .onTapGesture {
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) { isExtended = true }
+            }
+            .transition(.scale(scale: 0.55).combined(with: .opacity))
+            .accessibilityLabel("Drawing tool: \(selectedTool.label). Tap to choose another.")
+        }
+    }
+
+    /// Full-color tool artwork when present, otherwise the SF Symbol —
+    /// mirrors the main toolbar's glyphs.
+    @ViewBuilder
+    private func glyph(_ tool: DrawingToolType) -> some View {
+        if UIImage(named: tool.assetName) != nil {
+            Image(tool.assetName)
+                .resizable()
+                .renderingMode(.original)
+                .scaledToFit()
+                .frame(width: 24, height: 24)
+        } else {
+            Image(systemName: tool.systemImage)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(tool == selectedTool ? themeManager.outline : themeManager.iconTint)
+        }
+    }
+
+    /// Keeps the control fully on screen — including the wide extended kit.
+    private func clamped(_ p: CGPoint, in size: CGSize) -> CGPoint {
+        let halfWidth: CGFloat = isExtended
+            ? (CGFloat(tools.count) * 43 + 18) / 2 + 6
+            : diameter / 2 + 6
+        let halfHeight = diameter / 2 + 6
+        return CGPoint(
+            x: min(max(p.x, halfWidth), size.width - halfWidth),
+            y: min(max(p.y, halfHeight), size.height - halfHeight)
+        )
     }
 }
 
