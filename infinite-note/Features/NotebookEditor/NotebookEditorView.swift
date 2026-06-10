@@ -26,6 +26,7 @@ struct NotebookEditorView: View {
     ]
     @State private var showColorPicker = false
     @State private var showErasePageConfirm = false
+    @State private var showMoreTools = false
 
     // Page style
     @State private var showStylePicker = false
@@ -62,6 +63,11 @@ struct NotebookEditorView: View {
         Color(red: 0.96, green: 0.33, blue: 0.61),
         Color(red: 0.60, green: 0.34, blue: 0.12),
     ]
+
+    private let primaryTools: [DrawingToolType] = [.pen, .fountainPen, .eraser]
+    private var remainingTools: [DrawingToolType] {
+        DrawingToolType.allCases.filter { !primaryTools.contains($0) }
+    }
 
     init(
         notebook: Notebook,
@@ -550,7 +556,12 @@ struct NotebookEditorView: View {
 
     private var toolKitCapsule: some View {
         HStack(spacing: 4) {
-            ForEach(DrawingToolType.allCases, id: \.self) { toolButton($0) }
+            ForEach(primaryTools, id: \.self) { toolButton($0, closesMoreTools: showMoreTools) }
+            moreToolsButton
+            if showMoreTools {
+                ForEach(remainingTools, id: \.self) { toolButton($0, closesMoreTools: true) }
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 5)
@@ -593,12 +604,44 @@ struct NotebookEditorView: View {
         )
         .shadow(color: .black.opacity(themeManager.isDark ? 0.34 : 0.16), radius: 5, x: 1.5, y: 3)
         .padding(.horizontal, 8)
+        .animation(.spring(response: 0.32, dampingFraction: 0.78), value: showMoreTools)
     }
 
-    private func toolButton(_ tool: DrawingToolType) -> some View {
+    private var moreToolsButton: some View {
+        Button {
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.72)) {
+                showMoreTools.toggle()
+            }
+        } label: {
+            Image(systemName: "chevron.right")
+                .font(.system(size: 16, weight: .black))
+                .foregroundStyle(themeManager.iconTint)
+                .rotationEffect(.degrees(showMoreTools ? 180 : 0))
+                .frame(width: 39, height: 39)
+                .background(
+                    Circle()
+                        .fill(showMoreTools ? themeManager.selectionColor : Color.clear)
+                )
+                .background(
+                    Circle()
+                        .fill(showMoreTools ? themeManager.hardShadow.opacity(0.28) : Color.clear)
+                        .offset(x: 2, y: 2.5)
+                )
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("More drawing tools")
+    }
+
+    private func toolButton(_ tool: DrawingToolType, closesMoreTools: Bool = false) -> some View {
         let isSelected = selectedTool == tool
         // One universal icon tint; the selected tool gets a circular chip.
-        return Button { withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { selectedTool = tool } } label: {
+        return Button {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                selectedTool = tool
+                if closesMoreTools { showMoreTools = false }
+            }
+        } label: {
             toolGlyph(tool, isSelected: isSelected)
                 .frame(width: 39, height: 39)
                 .background(
