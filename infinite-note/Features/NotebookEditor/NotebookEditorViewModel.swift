@@ -180,13 +180,34 @@ final class NotebookEditorViewModel {
     func setPageStyle(_ style: PageStyle, backgroundImageData: Data? = nil) {
         guard let idx = pages.indices.first(where: { pages[$0].id == currentPage?.id }),
               let page = currentPage else { return }
+
+        // Photo style: persist the image FIRST and surface a failure — a
+        // swallowed `try?` here left the page styled "photo" with no image
+        // on disk (blank after relaunch, blank in exports).
+        if style == .photo, let data = backgroundImageData {
+            do {
+                try storage.savePageBackground(data, notebookId: notebook.id, pageId: page.id)
+            } catch {
+                errorMessage = "Couldn't save the photo background — check "
+                    + "free storage. The page style was not changed. "
+                    + "(\(error.localizedDescription))"
+                return
+            }
+        }
+
+        // Persist the style; roll back the in-memory value on failure so the
+        // UI never shows a style the database doesn't have.
+        let previousStyle = pages[idx].pageStyle
         pages[idx].pageStyle = style
         do { try drawingService.updatePageStyle(style, for: pages[idx]) }
-        catch { errorMessage = error.localizedDescription; return }
+        catch {
+            pages[idx].pageStyle = previousStyle
+            errorMessage = error.localizedDescription
+            return
+        }
 
         if style == .photo {
             if let data = backgroundImageData {
-                try? storage.savePageBackground(data, notebookId: notebook.id, pageId: page.id)
                 pageBackgroundImage = UIImage(data: data)
             }
         } else {

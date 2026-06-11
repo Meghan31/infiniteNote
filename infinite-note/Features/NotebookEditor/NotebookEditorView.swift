@@ -61,6 +61,12 @@ struct NotebookEditorView: View {
     @State private var sharePDFItem: SharePDFItem?
     @State private var showPDFExporter = false
     @State private var exportDocument: PDFExportDocument?
+    /// Non-nil while a PDF is being generated (off the main thread) — drives
+    /// the progress bubble, disables the export buttons, and guards against
+    /// double-starts.
+    @State private var pdfExportAction: PDFExportAction?
+
+    private enum PDFExportAction { case download, share }
 
     @EnvironmentObject private var themeManager: ThemeManager
 
@@ -130,6 +136,14 @@ struct NotebookEditorView: View {
                     if !isImmersive { pageFooter }
                     if let hint = pageHintText {
                         pageHintBubble(hint)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                            .allowsHitTesting(false)
+                            .transition(.scale(scale: 0.85).combined(with: .opacity))
+                    }
+                    // PDF render in progress (download / share) — generation
+                    // runs off-main; this is the visible feedback.
+                    if pdfExportAction != nil {
+                        exportProgressBubble
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                             .allowsHitTesting(false)
                             .transition(.scale(scale: 0.85).combined(with: .opacity))
@@ -856,12 +870,14 @@ struct NotebookEditorView: View {
                 capsuleActionIcon(asset: themedActionAsset("download"), systemName: "arrow.down.circle", size: 32)
             }
             .buttonStyle(.plain)
+            .disabled(pdfExportAction != nil)
             .accessibilityLabel("Download PDF")
 
             JigglingIconButton(duration: 0.2, action: { sharePDF() }) {
                 capsuleActionIcon(asset: themedActionAsset("share"), systemName: "square.and.arrow.up", size: 32)
             }
             .buttonStyle(.plain)
+            .disabled(pdfExportAction != nil)
             .accessibilityLabel("Share PDF")
 
             JigglingIconButton(duration: 0.2, action: { showSyncConfirm = true }) {
@@ -1092,31 +1108,65 @@ struct NotebookEditorView: View {
     }
 
     // MARK: - PDF Export
+    //
+    // Generation runs OFF the main thread: rendering a long notebook used to
+    // freeze the whole UI for seconds with no feedback. The strokes are saved
+    // on the main actor FIRST (the render reads them from disk), then the
+    // heavy work happens in a detached task while the progress bubble shows.
 
-    /// Saves the current page, then renders the whole notebook to a temp PDF.
-    private func makeNotebookPDF() -> URL? {
+    private func downloadPDF() { startPDFExport(.download) }
+    private func sharePDF()    { startPDFExport(.share) }
+
+    private func startPDFExport(_ action: PDFExportAction) {
+        guard pdfExportAction == nil else { return }   // one export at a time
+        // Persist in-flight strokes before the background render reads disk.
         viewModel.saveCurrentDrawing()
-        // The canvas always draws on the constant `PaperSpec` paper, so the
-        // PDF page is 1:1 with the screen in every mode; the canvasSize
-        // parameter is legacy and no longer affects the page size.
-        let canvasSize = viewModel.canvasController.canvasView?.bounds.size
-        do {
-            return try PDFGenerator.shared.generatePDF(for: notebook, canvasSize: canvasSize)
-        } catch {
-            viewModel.errorMessage = error.localizedDescription
-            return nil
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+            pdfExportAction = action
+        }
+        let notebook = self.notebook
+        Task { @MainActor in
+            defer {
+                withAnimation(.easeOut(duration: 0.2)) { pdfExportAction = nil }
+            }
+            do {
+                // Render — and for downloads, read the bytes back — off-main.
+                let (url, data) = try await Task.detached(priority: .userInitiated) {
+                    () -> (URL, Data?) in
+                    let url = try PDFGenerator.shared.generatePDF(for: notebook)
+                    let data: Data? = action == .download ? try Data(contentsOf: url) : nil
+                    return (url, data)
+                }.value
+                switch action {
+                case .share:
+                    sharePDFItem = SharePDFItem(url: url)
+                case .download:
+                    if let data {
+                        exportDocument = PDFExportDocument(data: data)
+                        showPDFExporter = true
+                    }
+                }
+            } catch {
+                // Surfaced via the existing error alert. (Download failures
+                // used to be silently swallowed by a `try?` here.)
+                viewModel.errorMessage = error.localizedDescription
+            }
         }
     }
 
-    private func downloadPDF() {
-        guard let url = makeNotebookPDF(), let data = try? Data(contentsOf: url) else { return }
-        exportDocument = PDFExportDocument(data: data)
-        showPDFExporter = true
-    }
-
-    private func sharePDF() {
-        guard let url = makeNotebookPDF() else { return }
-        sharePDFItem = SharePDFItem(url: url)
+    /// Small floating status shown over the canvas while the PDF renders.
+    private var exportProgressBubble: some View {
+        HStack(spacing: 10) {
+            ProgressView().tint(.white)
+            Text("Preparing PDF\u{2026}")
+                .font(.cartoon(13, weight: .bold))
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 11)
+        .background(Capsule().fill(Color(white: 0.32)))
+        .overlay(Capsule().strokeBorder(themeManager.outline.opacity(0.4), lineWidth: 1.5))
+        .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
     }
 }
 

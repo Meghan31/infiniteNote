@@ -57,41 +57,51 @@ final class PDFGenerator {
             drawCoverPage(for: notebook, pageSize: pageSize, pageCount: pages.count)
         }
 
-        for page in pages {
-            // Per-page pool: stroke bitmaps are large (pageSize × 2 scale);
-            // without this every page's bitmap stays alive until the end.
-            try autoreleasepool {
-                let drawing = try DrawingService.shared.loadDrawing(for: page)
-                UIGraphicsBeginPDFPageWithInfo(CGRect(origin: .zero, size: pageSize), nil)
-                guard let ctx = UIGraphicsGetCurrentContext() else { return }
+        do {
+            for page in pages {
+                // Per-page pool: stroke bitmaps are large (pageSize × 2 scale);
+                // without this every page's bitmap stays alive until the end.
+                try autoreleasepool {
+                    let drawing = try DrawingService.shared.loadDrawing(for: page)
+                    UIGraphicsBeginPDFPageWithInfo(CGRect(origin: .zero, size: pageSize), nil)
+                    guard let ctx = UIGraphicsGetCurrentContext() else { return }
 
-                // White page background.
-                ctx.setFillColor(UIColor.white.cgColor)
-                ctx.fill(CGRect(origin: .zero, size: pageSize))
+                    // White page background.
+                    ctx.setFillColor(UIColor.white.cgColor)
+                    ctx.fill(CGRect(origin: .zero, size: pageSize))
 
-                // The page's actual style — including a .photo background.
-                // Scale 1: the canvas and PDF share the same coordinate space.
-                drawBackground(for: page, in: ctx, pageSize: pageSize, scale: 1)
+                    // The page's actual style — including a .photo background.
+                    // Scale 1: the canvas and PDF share the same coordinate space.
+                    drawBackground(for: page, in: ctx, pageSize: pageSize, scale: 1)
 
-                // Strokes live in paper coordinates, so they normally render 1:1.
-                // Legacy strokes (drawn before the fixed paper existed) may extend
-                // past the page — render from the union of paper and stroke bounds
-                // and fit it onto the page, so NOTHING is ever trimmed.
-                let bounds = drawing.bounds
-                let source = CGSize(
-                    width: max(pageSize.width, bounds.isNull ? 0 : bounds.maxX),
-                    height: max(pageSize.height, bounds.isNull ? 0 : bounds.maxY)
-                )
-                let fit = min(pageSize.width / source.width, pageSize.height / source.height)
-                // Render in a forced-light trait so ink never inverts to white.
-                let strokeImage = renderStrokeImage(drawing, source: source)
-                strokeImage.draw(in: CGRect(
-                    origin: .zero,
-                    size: CGSize(width: source.width * fit, height: source.height * fit)
-                ))
+                    // Strokes live in paper coordinates, so they normally render 1:1.
+                    // Legacy strokes (drawn before the fixed paper existed) may extend
+                    // past the page — render from the union of paper and stroke bounds
+                    // and fit it onto the page, so NOTHING is ever trimmed.
+                    let bounds = drawing.bounds
+                    let source = CGSize(
+                        width: max(pageSize.width, bounds.isNull ? 0 : bounds.maxX),
+                        height: max(pageSize.height, bounds.isNull ? 0 : bounds.maxY)
+                    )
+                    let fit = min(pageSize.width / source.width, pageSize.height / source.height)
+                    // Render in a forced-light trait so ink never inverts to white.
+                    let strokeImage = renderStrokeImage(drawing, source: source)
+                    strokeImage.draw(in: CGRect(
+                        origin: .zero,
+                        size: CGSize(width: source.width * fit, height: source.height * fit)
+                    ))
 
-                drawPageNumber(page.pageNumber, totalPages: pages.count, in: ctx, pageSize: pageSize)
+                    drawPageNumber(page.pageNumber, totalPages: pages.count, in: ctx, pageSize: pageSize)
+                }
             }
+        } catch {
+            // A failed page load/render must still CLOSE the global PDF
+            // context — leaving it open leaks the file handle and lets later
+            // UIKit drawing land inside the orphaned context. The partial
+            // file is removed; stale export folders are purged hourly anyway.
+            UIGraphicsEndPDFContext()
+            try? fm.removeItem(at: exportDir)
+            throw error
         }
 
         UIGraphicsEndPDFContext()

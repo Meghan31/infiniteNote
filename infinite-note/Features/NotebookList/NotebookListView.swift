@@ -145,9 +145,24 @@ struct NotebookListView: View {
         .sheet(item: $notebookToEditCover) { nb in
             EditCoverSheet(
                 notebook: nb,
-                onSaveColor: { colorIndex in viewModel.updateCoverColor(colorIndex, for: nb); notebookToEditCover = nil },
-                onSavePhoto: { data in viewModel.updateCoverImage(data, for: nb); notebookToEditCover = nil },
-                onSaveDetails: { description, author in viewModel.updateDetails(description: description, author: author, for: nb) },
+                // Every save path also refreshes the open-tab / selection
+                // copies (like rename does) — otherwise a notebook open in
+                // the editor keeps exporting PDFs with the OLD cover color,
+                // description and author until it's reopened.
+                onSaveColor: { colorIndex in
+                    viewModel.updateCoverColor(colorIndex, for: nb)
+                    syncOpenCopies(of: nb.id)
+                    notebookToEditCover = nil
+                },
+                onSavePhoto: { data in
+                    viewModel.updateCoverImage(data, for: nb)
+                    syncOpenCopies(of: nb.id)
+                    notebookToEditCover = nil
+                },
+                onSaveDetails: { description, author in
+                    viewModel.updateDetails(description: description, author: author, for: nb)
+                    syncOpenCopies(of: nb.id)
+                },
                 onCancel: { notebookToEditCover = nil }
             )
         }

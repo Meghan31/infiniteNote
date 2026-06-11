@@ -115,10 +115,6 @@ final class NotebookListViewModel {
         } catch { errorMessage = error.localizedDescription }
     }
 
-    func deleteNotebooks(at offsets: IndexSet) {
-        for index in offsets { deleteNotebook(notebooks[index]) }
-    }
-
     // MARK: - Cover
 
     func updateCoverColor(_ colorIndex: Int, for notebook: Notebook) {
@@ -238,6 +234,10 @@ final class NotebookListViewModel {
             )
             folders.insert(folder, at: 0)
             folderMemberships[folder.id] = []
+            // Match the DB sort (pinned first, then recency) — a plain
+            // insert(at: 0) put the new folder ABOVE pinned ones until the
+            // next reload (same bug class as createNotebook, fixed above).
+            sortFolders()
         } catch { errorMessage = error.localizedDescription }
     }
 
