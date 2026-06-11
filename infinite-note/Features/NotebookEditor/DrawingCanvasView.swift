@@ -67,6 +67,32 @@ enum DrawingToolType: String, CaseIterable, Hashable {
     /// whether to show the color picker.
     var isInk: Bool { self != .eraser }
 
+    // MARK: Strength (0–10)
+    //
+    // A tool-independent "strength" scale: 0 = the tool's finest line,
+    // 10 = its thickest. The same number suits every pen because it maps
+    // onto EACH tool's own size range (a strength-5 marker is much wider
+    // in points than a strength-5 pen — as it should be).
+
+    /// Point width for a 0–10 strength (clamped).
+    func width(forStrength strength: Double) -> CGFloat {
+        let unit = min(max(strength, 0), 10) / 10
+        return sizeRange.lowerBound
+            + CGFloat(unit) * (sizeRange.upperBound - sizeRange.lowerBound)
+    }
+
+    /// 0–10 strength for a point width (clamped into `sizeRange`).
+    func strength(forWidth width: CGFloat) -> Double {
+        let span = sizeRange.upperBound - sizeRange.lowerBound
+        guard span > 0 else { return 0 }
+        let clamped = min(max(width, sizeRange.lowerBound), sizeRange.upperBound)
+        return Double((clamped - sizeRange.lowerBound) / span) * 10
+    }
+
+    /// The tool's tuned `defaultSize` expressed on the strength scale —
+    /// surfaced as the "best" value in the strength input.
+    var recommendedStrength: Double { strength(forWidth: defaultSize) }
+
     /// Asset-catalog image name for the custom tool icon. When the asset exists
     /// it's used (full color); otherwise the view falls back to `systemImage`.
     /// Names match the downloaded artwork.

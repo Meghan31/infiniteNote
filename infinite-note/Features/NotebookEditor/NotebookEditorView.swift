@@ -41,6 +41,10 @@ struct NotebookEditorView: View {
     @State private var showColorPicker = false
     @State private var showErasePageConfirm = false
     @State private var showMoreTools = false
+    /// Double-tap the size slider → numeric strength input (0–10) for the
+    /// current tool.
+    @State private var showStrengthInput = false
+    @State private var strengthText = ""
 
     // Page style
     @State private var showStylePicker = false
@@ -89,6 +93,13 @@ struct NotebookEditorView: View {
     private let primaryTools: [DrawingToolType] = [.pen, .fountainPen, .eraser]
     private var remainingTools: [DrawingToolType] {
         DrawingToolType.allCases.filter { !primaryTools.contains($0) }
+    }
+    /// When a NON-primary tool is selected from the arrow, it gets pinned
+    /// into the capsule (between the eraser and the arrow) so the active
+    /// tool is always visible — before this, picking e.g. the highlighter
+    /// collapsed the kit and nothing on screen showed what was selected.
+    private var pinnedExtraTool: DrawingToolType? {
+        primaryTools.contains(selectedTool) ? nil : selectedTool
     }
 
     init(
@@ -759,10 +770,19 @@ struct NotebookEditorView: View {
     private var toolKitCapsule: some View {
         HStack(spacing: 4) {
             ForEach(primaryTools, id: \.self) { toolButton($0, closesMoreTools: showMoreTools) }
+            // Active extra tool rides next to the eraser, before the arrow:
+            // Pen · Fountain · Eraser · [Highlighter] · ➤
+            if let pinned = pinnedExtraTool {
+                toolButton(pinned, closesMoreTools: showMoreTools)
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+            }
             moreToolsButton
             if showMoreTools {
-                ForEach(remainingTools, id: \.self) { toolButton($0, closesMoreTools: true) }
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                // The pinned tool is already visible — don't list it twice.
+                ForEach(remainingTools.filter { $0 != pinnedExtraTool }, id: \.self) {
+                    toolButton($0, closesMoreTools: true)
+                }
+                .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
         .padding(.horizontal, 9)
@@ -807,6 +827,8 @@ struct NotebookEditorView: View {
         .shadow(color: .black.opacity(themeManager.isDark ? 0.34 : 0.16), radius: 5, x: 1.5, y: 3)
         .padding(.horizontal, 8)
         .animation(.spring(response: 0.32, dampingFraction: 0.78), value: showMoreTools)
+        // Animate the pinned slot appearing/changing next to the eraser.
+        .animation(.spring(response: 0.32, dampingFraction: 0.78), value: pinnedExtraTool)
     }
 
     private var moreToolsButton: some View {
@@ -992,6 +1014,91 @@ struct NotebookEditorView: View {
             Image(systemName: "circle.fill").font(.system(size: 12)).foregroundStyle(themeManager.textSecondary.opacity(0.5))
         }
         .padding(.horizontal, 10)
+        .contentShape(Rectangle())
+        // Double-tap the bar → type an exact strength (0–10).
+        // simultaneousGesture so the slider's own drag keeps working.
+        .simultaneousGesture(TapGesture(count: 2).onEnded {
+            strengthText = ""   // empty → the "Best: N" placeholder shows
+            showStrengthInput = true
+        })
+        .popover(isPresented: $showStrengthInput,
+                 attachmentAnchor: .rect(.bounds),
+                 arrowEdge: .top) { strengthPopover }
+    }
+
+    // MARK: - Stroke Strength Input (0–10)
+
+    /// Current tool's size expressed on the 0–10 strength scale.
+    private var currentStrength: Double { selectedTool.strength(forWidth: currentSize) }
+
+    /// "7" for whole values, "7.5" otherwise.
+    private func strengthString(_ value: Double) -> String {
+        let rounded = (value * 10).rounded() / 10
+        return rounded == rounded.rounded()
+            ? String(Int(rounded))
+            : String(format: "%.1f", rounded)
+    }
+
+    /// Typed strength, accepted only when it parses and is within 0...10.
+    private var parsedStrength: Double? {
+        guard let value = Double(strengthText.replacingOccurrences(of: ",", with: ".")),
+              (0...10).contains(value) else { return nil }
+        return value
+    }
+
+    private func applyStrength() {
+        guard let strength = parsedStrength else { return }
+        toolSizes[selectedTool] = selectedTool.width(forStrength: strength)
+        showStrengthInput = false
+    }
+
+    private var strengthPopover: some View {
+        let tool = selectedTool
+        let best = strengthString(tool.recommendedStrength)
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("\(tool.label) — Stroke Strength")
+                .font(.cartoon(14, weight: .heavy)).foregroundStyle(themeManager.iconTint)
+            Text("0 is the finest line, 10 the thickest. Each pen keeps its own strength.")
+                .font(.cartoon(12, weight: .medium))
+                .foregroundStyle(themeManager.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                TextField("Best: \(best)", text: $strengthText)
+                    .keyboardType(.decimalPad)
+                    .font(.system(size: 16, weight: .semibold))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(themeManager.card))
+                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .strokeBorder(parsedStrength == nil && !strengthText.isEmpty
+                                      ? Color.burgundy : themeManager.border,
+                                      lineWidth: 1.5))
+                    .frame(width: 104)
+                    .onSubmit { applyStrength() }
+
+                Button { applyStrength() } label: {
+                    Text("Apply")
+                        .font(.cartoon(14, weight: .heavy))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16).padding(.vertical, 9)
+                        .background(Capsule().fill(parsedStrength == nil
+                                                   ? Color.gray.opacity(0.45) : Color.burgundy))
+                        .overlay(Capsule().strokeBorder(themeManager.outline.opacity(0.5), lineWidth: 1.5))
+                }
+                .buttonStyle(.plain)
+                .disabled(parsedStrength == nil)
+            }
+
+            // The tool's recommended value + where the pen sits right now.
+            Label("Best for \(tool.label): \(best)  ·  current: \(strengthString(currentStrength))",
+                  systemImage: "sparkles")
+                .font(.cartoon(12, weight: .bold))
+                .foregroundStyle(Color.pineTeal)
+        }
+        .padding(16)
+        .frame(width: 286)
+        .modifier(ForcePopoverAdaptation())
     }
 
     private var toolbarDivider: some View {
