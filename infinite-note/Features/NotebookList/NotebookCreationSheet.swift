@@ -283,10 +283,16 @@ struct EditCoverSheet: View {
     @State private var showFileImporter = false
     @State private var noteDescription: String
     @State private var author: String
+    /// The notebook's CURRENT photo cover, shown on the Photo tab until a new
+    /// one is picked — so "no new photo selected" visibly means "keep this".
+    @State private var existingCover: UIImage?
 
     enum CoverTab { case color, photo }
 
     private let covers = Color.notebookCovers
+    /// Swatch preselected on open — used to detect whether the user actually
+    /// changed the color (see the Save button).
+    private let initialColorIndex: Int
 
     init(
         notebook: Notebook,
@@ -303,8 +309,9 @@ struct EditCoverSheet: View {
         // Wrap legacy out-of-range indices (the old palette went 0...7; the
         // current one has 6 colors) so the matching swatch shows as selected.
         let coverCount = Color.notebookCovers.count
-        self._colorIndex = State(initialValue:
-            ((notebook.coverColorIndex % coverCount) + coverCount) % coverCount)
+        let wrapped = ((notebook.coverColorIndex % coverCount) + coverCount) % coverCount
+        self.initialColorIndex = wrapped
+        self._colorIndex = State(initialValue: wrapped)
         self._coverTab = State(initialValue: notebook.coverImagePath != nil ? .photo : .color)
         self._noteDescription = State(initialValue: notebook.noteDescription ?? "")
         self._author = State(initialValue: notebook.author ?? "")
@@ -346,6 +353,12 @@ struct EditCoverSheet: View {
                             if let data = photoData, let img = UIImage(data: data) {
                                 Image(uiImage: img).resizable().scaledToFill()
                                     .frame(height: 90).clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            } else if let img = existingCover {
+                                // Current cover — kept as-is unless a new
+                                // photo is picked below.
+                                Image(uiImage: img).resizable().scaledToFill()
+                                    .frame(height: 90).clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                    .opacity(0.85)
                             }
                             HStack(spacing: 16) {
                                 PhotosPicker(selection: $photoItem, matching: .images, photoLibrary: .shared()) {
@@ -398,8 +411,21 @@ struct EditCoverSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
                         onSaveDetails(noteDescription.nilIfBlank, author.nilIfBlank)
-                        if coverTab == .photo, let data = photoData { onSavePhoto(data) }
-                        else { onSaveColor(colorIndex) }
+                        // Only touch the cover when the user actually changed
+                        // it. (Detail-only edits used to fall through to
+                        // onSaveColor, silently DELETING a photo cover.)
+                        if coverTab == .photo {
+                            if let data = photoData {
+                                onSavePhoto(data)   // new photo → replace
+                            } else {
+                                onCancel()          // keep current photo; close
+                            }
+                        } else if colorIndex != initialColorIndex
+                                    || notebook.coverImagePath != nil {
+                            onSaveColor(colorIndex) // color changed, or photo → color
+                        } else {
+                            onCancel()              // nothing changed; close
+                        }
                     }
                     .fontWeight(.semibold).foregroundStyle(Color.burgundy)
                 }
@@ -407,6 +433,12 @@ struct EditCoverSheet: View {
         }
         .themeToggleOverlay()
         .presentationDetents([.medium, .large])
+        .task {
+            guard notebook.coverImagePath != nil else { return }
+            existingCover = await Task.detached(priority: .userInitiated) {
+                FileStorageManager.shared.loadCoverImage(notebookId: notebook.id)
+            }.value
+        }
     }
 }
 

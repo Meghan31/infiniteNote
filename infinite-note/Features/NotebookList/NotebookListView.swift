@@ -341,6 +341,17 @@ struct NotebookListView: View {
         }
     }
 
+    /// Refreshes the value copies that drive the editor (open tabs + current
+    /// selection) from the view model, so edits like a rename show up in the
+    /// tab bar and navigation title without reopening the notebook.
+    private func syncOpenCopies(of notebookId: String) {
+        guard let fresh = viewModel.notebooks.first(where: { $0.id == notebookId }) else { return }
+        if let idx = openNotebooks.firstIndex(where: { $0.id == notebookId }) {
+            openNotebooks[idx] = fresh
+        }
+        if selectedNotebook?.id == notebookId { selectedNotebook = fresh }
+    }
+
     /// Opens a notebook in the editor (from the sidebar, a folder, or search).
     private func openNotebook(_ notebook: Notebook) {
         withAnimation(.easeOut(duration: 0.2)) {
@@ -701,9 +712,15 @@ struct NotebookListView: View {
                     Button("Cancel") { notebookToRename = nil }.foregroundStyle(themeManager.textSecondary)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") { viewModel.renameNotebook(notebook, to: renameText); notebookToRename = nil }
-                        .fontWeight(.semibold).foregroundStyle(Color.burgundy)
-                        .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Button("Save") {
+                        viewModel.renameNotebook(notebook, to: renameText)
+                        // Keep the open tab + nav title in sync — these are
+                        // value copies that a rename doesn't reach on its own.
+                        syncOpenCopies(of: notebook.id)
+                        notebookToRename = nil
+                    }
+                    .fontWeight(.semibold).foregroundStyle(Color.burgundy)
+                    .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }

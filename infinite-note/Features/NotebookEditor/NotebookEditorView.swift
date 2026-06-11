@@ -848,20 +848,23 @@ struct NotebookEditorView: View {
     }
 
     private var exportActionsCapsule: some View {
+        // duration 0.2 like every other call site — the default (1 s) made
+        // download/share/sync feel broken: a full second before anything
+        // happened.
         HStack(spacing: 2) {
-            JigglingIconButton(action: { downloadPDF() }) {
+            JigglingIconButton(duration: 0.2, action: { downloadPDF() }) {
                 capsuleActionIcon(asset: themedActionAsset("download"), systemName: "arrow.down.circle", size: 32)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Download PDF")
 
-            JigglingIconButton(action: { sharePDF() }) {
+            JigglingIconButton(duration: 0.2, action: { sharePDF() }) {
                 capsuleActionIcon(asset: themedActionAsset("share"), systemName: "square.and.arrow.up", size: 32)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Share PDF")
 
-            JigglingIconButton(action: { showSyncConfirm = true }) {
+            JigglingIconButton(duration: 0.2, action: { showSyncConfirm = true }) {
                 capsuleActionIcon(asset: themedActionAsset("sync"), systemName: "icloud.and.arrow.up", size: 33)
             }
             .buttonStyle(.plain)

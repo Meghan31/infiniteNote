@@ -30,13 +30,14 @@ final class PDFGenerator {
         // Constant paper — identical for all notebooks, modes, and devices.
         let pageSize = PaperSpec.size
 
-        // Fresh export location per generation: purging the previous exports
-        // keeps tmp from accumulating, and the per-generation folder means
-        // two same-titled notebooks can never overwrite each other's file.
+        // Per-generation folder: two same-titled notebooks can never overwrite
+        // each other's file. Cleanup removes only folders older than an hour —
+        // wiping the whole root here could delete the temp PDF of a CONCURRENT
+        // export (e.g. a sync and a share running at once).
         let fm = FileManager.default
         let exportRoot = fm.temporaryDirectory
             .appendingPathComponent("notebook-pdf-exports", isDirectory: true)
-        try? fm.removeItem(at: exportRoot)
+        Self.purgeStaleExports(in: exportRoot)
         let exportDir = exportRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try fm.createDirectory(at: exportDir, withIntermediateDirectories: true)
         let baseName = notebook.title.sanitizedFilename
@@ -95,6 +96,22 @@ final class PDFGenerator {
 
         UIGraphicsEndPDFContext()
         return fileURL
+    }
+
+    /// Best-effort cleanup of previous exports: removes per-generation
+    /// folders older than an hour. Recent folders are left alone — they may
+    /// belong to an export still in flight. (The system also purges tmp.)
+    private static func purgeStaleExports(in root: URL) {
+        let fm = FileManager.default
+        guard let folders = try? fm.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.creationDateKey]
+        ) else { return }
+        let cutoff = Date.now.addingTimeInterval(-3600)
+        for folder in folders {
+            let created = (try? folder.resourceValues(forKeys: [.creationDateKey]).creationDate)
+                ?? .distantPast
+            if created < cutoff { try? fm.removeItem(at: folder) }
+        }
     }
 
     // MARK: - Cover Page

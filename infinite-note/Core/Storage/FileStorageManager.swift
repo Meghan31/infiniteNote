@@ -11,9 +11,12 @@ final class FileStorageManager {
             .appendingPathComponent("notebooks")
     }()
 
-    private init() {
-        try? FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
-    }
+    // No eager directory creation here: every save path builds its full
+    // directory chain on demand (`withIntermediateDirectories: true`) and
+    // THROWS to its caller on failure — so storage problems surface at the
+    // point of use instead of being silently swallowed at init. Loads check
+    // `fileExists` first, so a missing root is fine before the first save.
+    private init() {}
 
     // MARK: - Drawing
 

@@ -25,6 +25,10 @@ final class NotebookEditorViewModel {
     private let notebookService = NotebookService.shared
     private let storage = FileStorageManager.shared
     private var saveTask: Task<Void, Never>?
+    /// True after a stroke-save failure has been surfaced; reset by the next
+    /// successful save. Keeps the ~500 ms autosave from spamming one alert
+    /// per stroke while the disk stays full.
+    private var hasWarnedSaveFailure = false
 
     var currentPage: Page? {
         guard currentPageIndex < pages.count else { return nil }
@@ -85,7 +89,9 @@ final class NotebookEditorViewModel {
     }
 
     func deletePage(at index: Int) {
-        guard pages.count > 1 else { return }
+        // Bounds-check `index` too: context-menu deletes capture it at render
+        // time, so a stale index must never crash on `pages[index]`.
+        guard pages.count > 1, pages.indices.contains(index) else { return }
         // Persist any in-flight strokes on the CURRENT page before mutating
         // the page list — `loadCurrentDrawing()` below re-reads it from disk,
         // which would otherwise clobber strokes still in the debounce window
@@ -95,6 +101,10 @@ final class NotebookEditorViewModel {
         do {
             try drawingService.deletePage(page)
             pages.remove(at: index)
+            // Deleting a page ABOVE the current one shifts every later index
+            // down by one — follow the shift so the user stays on the page
+            // they were viewing instead of jumping to the next one.
+            if index < currentPageIndex { currentPageIndex -= 1 }
             if currentPageIndex >= pages.count { currentPageIndex = pages.count - 1 }
             try loadCurrentDrawing()
             loadPageBackground()
@@ -137,7 +147,20 @@ final class NotebookEditorViewModel {
         if let liveDrawing = canvasController.canvasView?.drawing {
             drawing = liveDrawing
         }
-        try? drawingService.saveDrawing(drawing, for: page)
+        do {
+            try drawingService.saveDrawing(drawing, for: page)
+            hasWarnedSaveFailure = false
+        } catch {
+            // Surface the failure (disk full, sandbox trouble) instead of
+            // silently dropping ink — once per failure streak, not per stroke.
+            if !hasWarnedSaveFailure {
+                hasWarnedSaveFailure = true
+                errorMessage = "Couldn't save your latest strokes — check free "
+                    + "storage. Keep this page open; saving retries on your "
+                    + "next stroke. (\(error.localizedDescription))"
+            }
+            return
+        }
         try? notebookService.touchNotebook(notebook)
         // Trigger thumbnail refresh for the saved page
         thumbnailRefreshTriggers[page.id, default: 0] += 1

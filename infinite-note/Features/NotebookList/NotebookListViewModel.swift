@@ -65,6 +65,10 @@ final class NotebookListViewModel {
                 author: author
             )
             notebooks.insert(notebook, at: 0)
+            // Match the DB sort (pinned first, then recency) — a plain
+            // insert(at: 0) put the new notebook ABOVE pinned ones until
+            // the next reload.
+            sortNotebooks()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -195,12 +199,18 @@ final class NotebookListViewModel {
     }
 
     /// Delete flow (synced notebook): also remove the cloud copy.
+    /// If the cloud step fails (e.g. offline), NOTHING is deleted — and the
+    /// error says so, so users know their notebook is still here.
     @MainActor
     func deleteAndUnsync(_ notebook: Notebook) async {
         do {
             try await SyncService.shared.unsyncNotebook(notebook)
             deleteNotebook(notebook)
-        } catch { errorMessage = error.localizedDescription }
+        } catch {
+            errorMessage = "Couldn't remove the cloud copy, so the notebook "
+                + "was NOT deleted — your local copy is untouched. Check your "
+                + "connection and try again. (\(error.localizedDescription))"
+        }
     }
 
     /// Delete flow (unsynced notebook): upload a cloud copy first, then
@@ -210,7 +220,11 @@ final class NotebookListViewModel {
         do {
             _ = try await SyncService.shared.syncNotebook(notebook)
             deleteNotebook(notebook)
-        } catch { errorMessage = error.localizedDescription }
+        } catch {
+            errorMessage = "Cloud backup failed, so the notebook was NOT "
+                + "deleted — your local copy is untouched. Check your "
+                + "connection and try again. (\(error.localizedDescription))"
+        }
     }
 
     // MARK: - Folders
