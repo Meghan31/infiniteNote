@@ -86,13 +86,14 @@ struct NotebookListView: View {
         .onAppear { viewModel.loadNotebooks() }
         // Create sheet — uses proper View struct so @State works
         .sheet(isPresented: $showCreateSheet) {
-            NotebookCreationSheet { title, colorIndex, photoData, style, description, author in
+            NotebookCreationSheet { title, colorIndex, photoData, style, pageBackground, description, author in
                 withAnimation(.easeOut(duration: 0.2)) {
                     viewModel.createNotebook(
                         title: title,
                         coverColorIndex: colorIndex,
                         coverImageData: photoData,
                         defaultPageStyle: style,
+                        pageBackgroundData: pageBackground,
                         description: description,
                         author: author
                     )

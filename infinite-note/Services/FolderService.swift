@@ -67,6 +67,8 @@ final class FolderService: @unchecked Sendable {
 
     /// Updates name / color / author, and optionally replaces the image
     /// (`imageData == nil` → keep the current image as-is).
+    /// Column-scoped: only the edited columns are written, so a stale
+    /// `Folder` struct can't revert other columns (e.g. `pinned`).
     func updateFolder(
         _ folder: Folder,
         name: String,
@@ -79,25 +81,32 @@ final class FolderService: @unchecked Sendable {
         updated.colorIndex = colorIndex
         updated.author = author
         updated.updatedAt = .now
+        var assignments: [ColumnAssignment] = [
+            Column("name").set(to: name),
+            Column("color_index").set(to: colorIndex),
+            Column("author").set(to: author),
+            Column("updated_at").set(to: updated.updatedAt)
+        ]
         if let data = imageData {
             try storage.saveFolderImage(data, folderId: folder.id)
             updated.imagePath = "cover.jpg"
+            assignments.append(Column("image_path").set(to: "cover.jpg"))
         }
-        try db.dbQueue.write { db in try updated.update(db) }
+        try update(folder.id, assignments)
         return updated
     }
 
     /// Pins / unpins the folder (pinned sort first on the homepage).
     func setPinned(_ pinned: Bool, for folder: Folder) throws {
-        var updated = folder
-        updated.isPinned = pinned
-        try db.dbQueue.write { db in try updated.update(db) }
+        try update(folder.id, [Column("pinned").set(to: pinned)])
     }
 
     /// Deletes the folder and its links — never the notebooks themselves.
+    /// DB row first (cascades the links), files after — a failed file
+    /// cleanup only orphans an image on disk.
     func deleteFolder(_ folder: Folder) throws {
-        storage.deleteFolderFiles(folderId: folder.id)
         try db.dbQueue.write { db in _ = try folder.delete(db) }
+        storage.deleteFolderFiles(folderId: folder.id)
     }
 
     // MARK: - Membership
@@ -125,8 +134,15 @@ final class FolderService: @unchecked Sendable {
     }
 
     private func touch(_ folder: Folder) throws {
-        var updated = folder
-        updated.updatedAt = .now
-        try db.dbQueue.write { db in try updated.update(db) }
+        try update(folder.id, [Column("updated_at").set(to: Date.now)])
+    }
+
+    /// Column-scoped UPDATE on one folder row.
+    private func update(_ folderId: String, _ assignments: [ColumnAssignment]) throws {
+        try db.dbQueue.write { db in
+            _ = try Folder
+                .filter(Column("id") == folderId)
+                .updateAll(db, assignments)
+        }
     }
 }

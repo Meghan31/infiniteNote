@@ -6,20 +6,39 @@ final class DatabaseManager: @unchecked Sendable {
 
     private(set) var dbQueue: DatabaseQueue
 
+    /// Non-nil when the on-disk database could not be opened or migrated and
+    /// the app fell back to a TEMPORARY in-memory database. The UI surfaces
+    /// this so the user knows changes won't persist this session.
+    /// (Previously this was a `fatalError`, which turned any disk-full or
+    /// corruption error into a permanent crash loop at launch.)
+    private(set) var initializationError: Error?
+
     private init() {
         let dbURL = FileManager.default
             .urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("infinite_note.db")
 
         do {
-            dbQueue = try DatabaseQueue(path: dbURL.path)
-            try runMigrations()
+            let queue = try DatabaseQueue(path: dbURL.path)
+            try Self.runMigrations(on: queue)
+            dbQueue = queue
         } catch {
-            fatalError("Database initialization failed: \(error)")
+            initializationError = error
+            // Keep the app usable without touching the (possibly corrupt)
+            // file on disk — a future launch or update may still recover it.
+            do {
+                let memoryQueue = try DatabaseQueue()
+                try Self.runMigrations(on: memoryQueue)
+                dbQueue = memoryQueue
+            } catch {
+                // Migrations are deterministic; if even an in-memory database
+                // fails, something is catastrophically wrong with the runtime.
+                fatalError("In-memory database initialization failed: \(error)")
+            }
         }
     }
 
-    private func runMigrations() throws {
+    private static func runMigrations(on dbQueue: DatabaseQueue) throws {
         var migrator = DatabaseMigrator()
 
         // v1 — initial schema

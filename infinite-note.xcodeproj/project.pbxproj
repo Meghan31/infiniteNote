@@ -575,8 +575,8 @@
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/groue/GRDB.swift";
 			requirement = {
-				branch = master;
-				kind = branch;
+				kind = upToNextMajorVersion;
+				minimumVersion = 7.11.0;
 			};
 		};
 		76D7FB8A2FCE980A0059D699 /* XCRemoteSwiftPackageReference "supabase-swift" */ = {

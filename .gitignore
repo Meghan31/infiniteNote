@@ -1,7 +1,13 @@
-//
-//  .gitignore
-//  infinite-note
-//
-//  Created by Meghasrivardhan Pulakhandam on 6/1/26.
-//
+# macOS
+.DS_Store
 
+# Xcode user state (per-machine, never needed in the repo)
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+
+# Secrets — the app's private sync credentials. NEVER commit this file.
+# (Copy SyncSecrets.example.swift from the repo root to
+#  infinite-note/Core/Sync/SyncSecrets.swift and fill it in.)
+SyncSecrets.swift

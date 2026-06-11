@@ -86,6 +86,11 @@ final class NotebookEditorViewModel {
 
     func deletePage(at index: Int) {
         guard pages.count > 1 else { return }
+        // Persist any in-flight strokes on the CURRENT page before mutating
+        // the page list — `loadCurrentDrawing()` below re-reads it from disk,
+        // which would otherwise clobber strokes still in the debounce window
+        // when a *different* page is deleted from the sidebar.
+        saveCurrentDrawing()
         let page = pages[index]
         do {
             try drawingService.deletePage(page)
@@ -122,6 +127,16 @@ final class NotebookEditorViewModel {
 
     func saveCurrentDrawing() {
         guard let page = currentPage else { return }
+        // Pull the LIVE drawing straight from the canvas first. The bound
+        // `drawing` copy can lag the canvas by up to ~400 ms (the
+        // coordinator's debounce), which used to silently drop strokes drawn
+        // right before a page switch, close, sync, or PDF export.
+        // (Safe at every call site: this runs before `currentPageIndex`
+        // changes, so the canvas still shows `currentPage`. If the canvas is
+        // already gone — e.g. onDisappear — we fall back to the bound copy.)
+        if let liveDrawing = canvasController.canvasView?.drawing {
+            drawing = liveDrawing
+        }
         try? drawingService.saveDrawing(drawing, for: page)
         try? notebookService.touchNotebook(notebook)
         // Trigger thumbnail refresh for the saved page

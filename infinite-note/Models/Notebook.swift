@@ -26,7 +26,7 @@ struct Notebook: Identifiable, Hashable, Sendable {
         title: String,
         createdAt: Date = .now,
         updatedAt: Date = .now,
-        coverColorIndex: Int = Int.random(in: 0...4), // keep in sync with Color.notebookCovers.count
+        coverColorIndex: Int = Int.random(in: 0..<Color_notebookCoversCount), // mirrors Color.notebookCovers.count
         coverImagePath: String? = nil,
         defaultPageStyle: PageStyle = .grid,
         noteDescription: String? = nil,

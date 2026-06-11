@@ -4,7 +4,9 @@ import PhotosUI
 // MARK: - Create Notebook Sheet
 
 struct NotebookCreationSheet: View {
-    var onCreate: (String, Int, Data?, PageStyle, String?, String?) -> Void
+    /// (title, coverColorIndex, coverPhotoData, pageStyle, pageBackgroundData,
+    ///  description, author)
+    var onCreate: (String, Int, Data?, PageStyle, Data?, String?, String?) -> Void
     var onCancel: () -> Void
 
     @EnvironmentObject private var themeManager: ThemeManager
@@ -16,6 +18,8 @@ struct NotebookCreationSheet: View {
     @State private var photoItem: PhotosPickerItem?
     @State private var photoData: Data?
     @State private var selectedStyle: PageStyle = .grid
+    /// Imported photo used as the page background when `selectedStyle == .photo`.
+    @State private var pageBackgroundData: Data?
     @State private var showFileImporter = false
 
     enum CoverTab { case color, photo }
@@ -79,6 +83,7 @@ struct NotebookCreationSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Create") {
                         onCreate(title, colorIndex, photoData, selectedStyle,
+                                 pageBackgroundData,
                                  noteDescription.nilIfBlank, author.nilIfBlank)
                     }
                     .fontWeight(.semibold).foregroundStyle(Color.burgundy)
@@ -174,10 +179,11 @@ struct NotebookCreationSheet: View {
                 set: { item in
                     guard let item else { return }
                     Task {
-                        if (try? await item.loadTransferable(type: Data.self)) != nil {
-                            // The photo loads OK — just mark the style as
-                            // .photo; the actual background is set after
-                            // creation via setPageStyle.
+                        // KEEP the photo — it's saved as the first page's
+                        // background on creation. (It used to be discarded,
+                        // leaving a "photo" page with no image.)
+                        if let data = try? await item.loadTransferable(type: Data.self) {
+                            pageBackgroundData = data
                             selectedStyle = .photo
                         }
                     }
@@ -294,7 +300,11 @@ struct EditCoverSheet: View {
         self.onSavePhoto = onSavePhoto
         self.onSaveDetails = onSaveDetails
         self.onCancel = onCancel
-        self._colorIndex = State(initialValue: notebook.coverColorIndex)
+        // Wrap legacy out-of-range indices (the old palette went 0...7; the
+        // current one has 6 colors) so the matching swatch shows as selected.
+        let coverCount = Color.notebookCovers.count
+        self._colorIndex = State(initialValue:
+            ((notebook.coverColorIndex % coverCount) + coverCount) % coverCount)
         self._coverTab = State(initialValue: notebook.coverImagePath != nil ? .photo : .color)
         self._noteDescription = State(initialValue: notebook.noteDescription ?? "")
         self._author = State(initialValue: notebook.author ?? "")

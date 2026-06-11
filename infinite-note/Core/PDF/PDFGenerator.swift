@@ -30,52 +30,71 @@ final class PDFGenerator {
         // Constant paper — identical for all notebooks, modes, and devices.
         let pageSize = PaperSpec.size
 
-        let pdfData = NSMutableData()
-        UIGraphicsBeginPDFContextToData(pdfData, CGRect(origin: .zero, size: pageSize), nil)
+        // Fresh export location per generation: purging the previous exports
+        // keeps tmp from accumulating, and the per-generation folder means
+        // two same-titled notebooks can never overwrite each other's file.
+        let fm = FileManager.default
+        let exportRoot = fm.temporaryDirectory
+            .appendingPathComponent("notebook-pdf-exports", isDirectory: true)
+        try? fm.removeItem(at: exportRoot)
+        let exportDir = exportRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: exportDir, withIntermediateDirectories: true)
+        let baseName = notebook.title.sanitizedFilename
+        let fileURL = exportDir
+            .appendingPathComponent("\(baseName.isEmpty ? "Notebook" : baseName).pdf")
+
+        // Stream the PDF straight to disk — the old ...ContextToData held the
+        // entire document in memory, which spiked badly on big notebooks.
+        guard UIGraphicsBeginPDFContextToFile(
+            fileURL.path, CGRect(origin: .zero, size: pageSize), nil
+        ) else {
+            throw PDFError.contextCreationFailed
+        }
 
         // Cover page — always the first page of the exported PDF.
-        drawCoverPage(for: notebook, pageSize: pageSize, pageCount: pages.count)
+        autoreleasepool {
+            drawCoverPage(for: notebook, pageSize: pageSize, pageCount: pages.count)
+        }
 
         for page in pages {
-            let drawing = try DrawingService.shared.loadDrawing(for: page)
-            UIGraphicsBeginPDFPageWithInfo(CGRect(origin: .zero, size: pageSize), nil)
-            guard let ctx = UIGraphicsGetCurrentContext() else { continue }
+            // Per-page pool: stroke bitmaps are large (pageSize × 2 scale);
+            // without this every page's bitmap stays alive until the end.
+            try autoreleasepool {
+                let drawing = try DrawingService.shared.loadDrawing(for: page)
+                UIGraphicsBeginPDFPageWithInfo(CGRect(origin: .zero, size: pageSize), nil)
+                guard let ctx = UIGraphicsGetCurrentContext() else { return }
 
-            // White page background.
-            ctx.setFillColor(UIColor.white.cgColor)
-            ctx.fill(CGRect(origin: .zero, size: pageSize))
+                // White page background.
+                ctx.setFillColor(UIColor.white.cgColor)
+                ctx.fill(CGRect(origin: .zero, size: pageSize))
 
-            // Draw the page's actual style (plain draws nothing). Scale 1 —
-            // the canvas and the PDF page share the same coordinate space.
-            drawBackground(for: page.pageStyle, in: ctx, pageSize: pageSize, scale: 1)
+                // The page's actual style — including a .photo background.
+                // Scale 1: the canvas and PDF share the same coordinate space.
+                drawBackground(for: page, in: ctx, pageSize: pageSize, scale: 1)
 
-            // Strokes live in paper coordinates, so they normally render 1:1.
-            // Legacy strokes (drawn before the fixed paper existed) may extend
-            // past the page — render from the union of paper and stroke bounds
-            // and fit it onto the page, so NOTHING is ever trimmed.
-            let bounds = drawing.bounds
-            let source = CGSize(
-                width: max(pageSize.width, bounds.isNull ? 0 : bounds.maxX),
-                height: max(pageSize.height, bounds.isNull ? 0 : bounds.maxY)
-            )
-            let fit = min(pageSize.width / source.width, pageSize.height / source.height)
-            // Render in a forced-light trait so ink never inverts to white.
-            let strokeImage = renderStrokeImage(drawing, source: source)
-            strokeImage.draw(in: CGRect(
-                origin: .zero,
-                size: CGSize(width: source.width * fit, height: source.height * fit)
-            ))
+                // Strokes live in paper coordinates, so they normally render 1:1.
+                // Legacy strokes (drawn before the fixed paper existed) may extend
+                // past the page — render from the union of paper and stroke bounds
+                // and fit it onto the page, so NOTHING is ever trimmed.
+                let bounds = drawing.bounds
+                let source = CGSize(
+                    width: max(pageSize.width, bounds.isNull ? 0 : bounds.maxX),
+                    height: max(pageSize.height, bounds.isNull ? 0 : bounds.maxY)
+                )
+                let fit = min(pageSize.width / source.width, pageSize.height / source.height)
+                // Render in a forced-light trait so ink never inverts to white.
+                let strokeImage = renderStrokeImage(drawing, source: source)
+                strokeImage.draw(in: CGRect(
+                    origin: .zero,
+                    size: CGSize(width: source.width * fit, height: source.height * fit)
+                ))
 
-            drawPageNumber(page.pageNumber, totalPages: pages.count, in: ctx, pageSize: pageSize)
+                drawPageNumber(page.pageNumber, totalPages: pages.count, in: ctx, pageSize: pageSize)
+            }
         }
 
         UIGraphicsEndPDFContext()
-
-        let tempURL = FileManager.default
-            .temporaryDirectory
-            .appendingPathComponent("\(notebook.title.sanitizedFilename).pdf")
-        pdfData.write(to: tempURL, atomically: true)
-        return tempURL
+        return fileURL
     }
 
     // MARK: - Cover Page
@@ -130,7 +149,7 @@ final class PDFGenerator {
 
     /// Draws `image` scaled to completely fill the page (centered, edges
     /// cropped) — like SwiftUI's `.scaledToFill()`.
-    private func drawAspectFill(_ image: UIImage, in ctx: CGContext, pageSize: CGSize) {
+    private func drawAspectFill(_ image: UIImage, in ctx: CGContext, pageSize: CGSize, alpha: CGFloat = 1) {
         guard image.size.width > 0, image.size.height > 0 else { return }
         let scale = max(pageSize.width / image.size.width, pageSize.height / image.size.height)
         let drawSize = CGSize(width: image.size.width * scale, height: image.size.height * scale)
@@ -138,7 +157,7 @@ final class PDFGenerator {
                              y: (pageSize.height - drawSize.height) / 2)
         ctx.saveGState()
         ctx.clip(to: CGRect(origin: .zero, size: pageSize))
-        image.draw(in: CGRect(origin: origin, size: drawSize))
+        image.draw(in: CGRect(origin: origin, size: drawSize), blendMode: .normal, alpha: alpha)
         ctx.restoreGState()
     }
 
@@ -313,7 +332,10 @@ final class PDFGenerator {
     private func renderStrokeImage(_ drawing: PKDrawing, source: CGSize) -> UIImage {
         var image = UIImage()
         let render = {
-            image = drawing.image(from: CGRect(origin: .zero, size: source), scale: 3.0)
+            // Scale 2 (was 3): plenty for print sharpness at A4, and roughly
+            // halves the per-page peak memory (a 1190×1684 page at 3× was a
+            // ~70 MB bitmap; at 2× it's ~32 MB, freed per page by the pool).
+            image = drawing.image(from: CGRect(origin: .zero, size: source), scale: 2.0)
         }
         if #available(iOS 13.0, *) {
             UITraitCollection(userInterfaceStyle: .light).performAsCurrent(render)
@@ -325,14 +347,25 @@ final class PDFGenerator {
 
     // MARK: - Page Style Backgrounds
 
-    private func drawBackground(for style: PageStyle, in ctx: CGContext, pageSize: CGSize, scale: CGFloat) {
+    private func drawBackground(for page: Page, in ctx: CGContext, pageSize: CGSize, scale: CGFloat) {
         let spacing: CGFloat = 28 * scale
         let line = UIColor.systemGray3.withAlphaComponent(0.55).cgColor
         let major = UIColor.systemGray2.withAlphaComponent(0.55).cgColor
 
-        switch style {
-        case .plain, .photo:
+        switch page.pageStyle {
+        case .plain:
             break
+
+        case .photo:
+            // The page's imported photo background — aspect-filled at the
+            // same 35% opacity the on-screen canvas uses, under the ink.
+            // (Previously skipped, so photo pages exported blank white.)
+            if let photo = FileStorageManager.shared.loadPageBackground(
+                notebookId: page.notebookId,
+                pageId: page.id
+            ) {
+                drawAspectFill(photo, in: ctx, pageSize: pageSize, alpha: 0.35)
+            }
 
         case .ruled:
             ctx.setStrokeColor(line)
@@ -404,9 +437,11 @@ final class PDFGenerator {
 
     enum PDFError: LocalizedError {
         case noPages
+        case contextCreationFailed
         var errorDescription: String? {
             switch self {
             case .noPages: return "No pages to export."
+            case .contextCreationFailed: return "Couldn't create the PDF file. Check free storage."
             }
         }
     }

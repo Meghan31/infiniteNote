@@ -30,16 +30,20 @@ final class DrawingService: @unchecked Sendable {
     }
 
     func deletePage(_ page: Page) throws {
-        try storage.deleteDrawing(notebookId: page.notebookId, pageId: page.id)
-        storage.deletePageBackground(notebookId: page.notebookId, pageId: page.id)
-        try db.dbQueue.write { db in _ = try page.delete(db) }
-        var remaining = try pages(for: page.notebookId)
+        // One transaction for the row delete + renumbering, so a crash can
+        // never leave gapped or duplicate page numbers. Files go last: an
+        // orphaned file on disk is harmless; a page row whose drawing was
+        // already deleted is not.
         try db.dbQueue.write { db in
-            for index in remaining.indices {
+            _ = try page.delete(db)
+            var remaining = try Page.forNotebook(page.notebookId).fetchAll(db)
+            for index in remaining.indices where remaining[index].pageNumber != index + 1 {
                 remaining[index].pageNumber = index + 1
                 try remaining[index].update(db)
             }
         }
+        try? storage.deleteDrawing(notebookId: page.notebookId, pageId: page.id)
+        storage.deletePageBackground(notebookId: page.notebookId, pageId: page.id)
     }
 
     func updatePageStyle(_ style: PageStyle, for page: Page) throws {

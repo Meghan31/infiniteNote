@@ -19,6 +19,15 @@ final class NotebookListViewModel {
 
     func loadNotebooks() {
         isLoading = true
+        // The database fell back to a temporary in-memory store (disk full,
+        // corruption, …) — warn once so the user knows nothing will persist.
+        if let dbError = DatabaseManager.shared.initializationError {
+            errorMessage = """
+            Your notebook library couldn't be opened, so changes made now \
+            won't be saved after the app closes. Freeing up storage and \
+            relaunching usually fixes this. (\(dbError.localizedDescription))
+            """
+        }
         do { notebooks = try service.allNotebooks() }
         catch { errorMessage = error.localizedDescription }
         loadFolders()
@@ -36,9 +45,10 @@ final class NotebookListViewModel {
 
     func createNotebook(
         title: String,
-        coverColorIndex: Int = Int.random(in: 0...7),
+        coverColorIndex: Int = Int.random(in: 0..<Color_notebookCoversCount),
         coverImageData: Data? = nil,
         defaultPageStyle: PageStyle = .grid,
+        pageBackgroundData: Data? = nil,
         description: String? = nil,
         author: String? = nil
     ) {
@@ -50,6 +60,7 @@ final class NotebookListViewModel {
                 coverColorIndex: coverColorIndex,
                 coverImageData: coverImageData,
                 defaultPageStyle: defaultPageStyle,
+                pageBackgroundData: pageBackgroundData,
                 description: description,
                 author: author
             )
