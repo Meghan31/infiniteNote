@@ -41,6 +41,8 @@ struct NotebookEditorView: View {
     @State private var showColorPicker = false
     @State private var showErasePageConfirm = false
     @State private var showMoreTools = false
+    @State private var eraserMode: EraserMode = .bitmap
+    @State private var showEraserPopover = false
     /// Double-tap the size slider → numeric strength input (0–10) for the
     /// current tool.
     @State private var showStrengthInput = false
@@ -225,6 +227,9 @@ struct NotebookEditorView: View {
                 }
                 pageStylePhotoItem = nil
             }
+        }
+        .onChange(of: selectedTool) { _, tool in
+            if tool != .eraser { showEraserPopover = false }
         }
         .confirmationDialog("Erase this page?", isPresented: $showErasePageConfirm, titleVisibility: .visible) {
             Button("Erase Page", role: .destructive) { viewModel.eraseCurrentPage() }
@@ -599,6 +604,7 @@ struct NotebookEditorView: View {
                     lineWidth: currentSize,
                     isDarkTheme: themeManager.isDark,
                     isReadOnly: isReadOnly,
+                    eraserMode: eraserMode,
                     canvasController: viewModel.canvasController,
                     onErasePage: { showErasePageConfirm = true },
                     onNextPage: { handleSwipeUpNext() },     // 3-finger up / read-only swipe left
@@ -857,14 +863,16 @@ struct NotebookEditorView: View {
         .accessibilityLabel("More drawing tools")
     }
 
+    @ViewBuilder
     private func toolButton(_ tool: DrawingToolType, closesMoreTools: Bool = false) -> some View {
         let isSelected = selectedTool == tool
         // One universal icon tint; the selected tool gets a circular chip.
-        return Button {
+        let button = Button {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
                 selectedTool = tool
                 if closesMoreTools { showMoreTools = false }
             }
+            showEraserPopover = tool == .eraser
         } label: {
             toolGlyph(tool, isSelected: isSelected)
                 .frame(width: 39, height: 39)
@@ -881,6 +889,71 @@ struct NotebookEditorView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(tool.label)
+
+        if tool == .eraser {
+            button.popover(
+                isPresented: $showEraserPopover,
+                attachmentAnchor: .rect(.bounds),
+                arrowEdge: .top
+            ) {
+                eraserPopover
+            }
+        } else {
+            button
+        }
+    }
+
+    private var eraserPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Eraser")
+                .font(.cartoon(14, weight: .heavy))
+                .foregroundStyle(themeManager.iconTint)
+
+            ForEach(EraserMode.allCases, id: \.self) { mode in
+                eraserModeButton(mode)
+            }
+        }
+        .padding(14)
+        .frame(width: 230)
+        .modifier(ForcePopoverAdaptation())
+    }
+
+    private func eraserModeButton(_ mode: EraserMode) -> some View {
+        let isSelected = eraserMode == mode
+        return Button {
+            eraserMode = mode
+            selectedTool = .eraser
+            showEraserPopover = false
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: mode.systemImage)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(isSelected ? themeManager.outline : themeManager.iconTint)
+                    .frame(width: 24, height: 24)
+
+                Text(mode.label)
+                    .font(.cartoon(13, weight: .bold))
+                    .foregroundStyle(themeManager.textPrimary)
+                    .lineLimit(1)
+
+                Spacer(minLength: 0)
+
+                Image(systemName: "checkmark")
+                    .font(.system(size: 12, weight: .black))
+                    .foregroundStyle(isSelected ? Color.pineTeal : Color.clear)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isSelected ? themeManager.selectionColor : themeManager.card)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(isSelected ? themeManager.outline.opacity(0.35) : themeManager.border, lineWidth: 1.2)
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     private var exportActionsCapsule: some View {

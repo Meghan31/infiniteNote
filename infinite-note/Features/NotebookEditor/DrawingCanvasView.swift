@@ -2,10 +2,29 @@
 import SwiftUI
 import PencilKit
 
+enum EraserMode: String, CaseIterable, Hashable {
+    case stroke
+    case bitmap
+
+    var label: String {
+        switch self {
+        case .stroke: return "Stroke Eraser"
+        case .bitmap: return "Pixel Eraser"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .stroke: return "scribble.variable"
+        case .bitmap: return "eraser.line.dashed.fill"
+        }
+    }
+}
+
 // MARK: - Drawing Tool Type
 
 enum DrawingToolType: String, CaseIterable, Hashable {
-    case pen, pencil, fountainPen, monoline, marker, crayon, watercolor, highlighter, eraser
+    case pen, pencil, fountainPen, monoline, marker, crayon, watercolor, highlighter, shape, eraser
 
     var label: String {
         switch self {
@@ -17,6 +36,7 @@ enum DrawingToolType: String, CaseIterable, Hashable {
         case .crayon:      return "Crayon"
         case .watercolor:  return "Watercolor"
         case .highlighter: return "Highlight"
+        case .shape:       return "Shape"
         case .eraser:      return "Eraser"
         }
     }
@@ -31,6 +51,7 @@ enum DrawingToolType: String, CaseIterable, Hashable {
         case .crayon:      return "paintbrush.fill"
         case .watercolor:  return "drop.fill"
         case .highlighter: return "highlighter"
+        case .shape:       return "square.on.circle"
         case .eraser:      return "eraser.fill"
         }
     }
@@ -45,6 +66,7 @@ enum DrawingToolType: String, CaseIterable, Hashable {
         case .crayon:      return 4...40
         case .watercolor:  return 8...60
         case .highlighter: return 10...60
+        case .shape:       return 1...24
         case .eraser:      return 5...50
         }
     }
@@ -59,6 +81,7 @@ enum DrawingToolType: String, CaseIterable, Hashable {
         case .crayon:      return 12
         case .watercolor:  return 26
         case .highlighter: return 25
+        case .shape:       return 4
         case .eraser:      return 20
         }
     }
@@ -106,8 +129,370 @@ enum DrawingToolType: String, CaseIterable, Hashable {
         case .crayon:      return "paint-brush"
         case .watercolor:  return "water-pen"
         case .highlighter: return "highlighter"
+        case .shape:       return "shape"
         case .eraser:      return "eraser"
         }
+    }
+}
+
+// MARK: - Shape Recognition
+
+private enum RecognizedShape {
+    case line(CGPoint, CGPoint)
+    case rectangle(CGRect)
+    case ellipse(CGRect)
+    case triangle([CGPoint])
+}
+
+private enum ShapeRecognitionEngine {
+    static func recognizedStroke(from stroke: PKStroke) -> PKStroke? {
+        let points = cleaned(stroke.path.map { $0.location })
+        guard points.count >= 4 else { return nil }
+
+        let bounds = boundingRect(points)
+        let diagonal = distance(bounds.origin, CGPoint(x: bounds.maxX, y: bounds.maxY))
+        guard diagonal >= 24 else { return nil }
+
+        let closedVertices = isClosed(points, diagonal: diagonal)
+            ? simplifiedClosedVertices(points, tolerance: max(12, diagonal * 0.1))
+            : []
+
+        let shape = recognizeLine(points, diagonal: diagonal)
+            ?? recognizeTriangle(closedVertices, diagonal: diagonal)
+            ?? recognizeRectangle(points, bounds: bounds, diagonal: diagonal)
+            ?? recognizeEllipse(points, bounds: bounds, diagonal: diagonal)
+
+        guard let shape else { return nil }
+        return makeStroke(for: shape, matching: stroke)
+    }
+
+    private static func recognizeLine(_ points: [CGPoint], diagonal: CGFloat) -> RecognizedShape? {
+        guard let first = points.first, let last = points.last else { return nil }
+        let direct = distance(first, last)
+        guard direct >= 30 else { return nil }
+
+        let total = pathLength(points)
+        let averageError = points
+            .map { distanceFromLine(point: $0, start: first, end: last) }
+            .reduce(0, +) / CGFloat(points.count)
+
+        guard total / direct <= 1.22, averageError <= max(8, diagonal * 0.055) else { return nil }
+        return .line(first, last)
+    }
+
+    private static func recognizeRectangle(
+        _ points: [CGPoint],
+        bounds: CGRect,
+        diagonal: CGFloat
+    ) -> RecognizedShape? {
+        guard isClosed(points, diagonal: diagonal),
+              bounds.width >= 24,
+              bounds.height >= 24 else { return nil }
+
+        let threshold = max(8, diagonal * 0.07)
+        let cornerThreshold = max(8, diagonal * 0.1)
+        var edgeHits = [false, false, false, false]
+        var cornerHits = [false, false, false, false]
+        var totalError: CGFloat = 0
+        let corners = [
+            CGPoint(x: bounds.minX, y: bounds.minY),
+            CGPoint(x: bounds.maxX, y: bounds.minY),
+            CGPoint(x: bounds.maxX, y: bounds.maxY),
+            CGPoint(x: bounds.minX, y: bounds.maxY)
+        ]
+
+        for point in points {
+            let distances = [
+                abs(point.x - bounds.minX),
+                abs(point.x - bounds.maxX),
+                abs(point.y - bounds.minY),
+                abs(point.y - bounds.maxY)
+            ]
+            guard let minDistance = distances.min() else { continue }
+            totalError += minDistance
+            for index in distances.indices where distances[index] <= threshold {
+                edgeHits[index] = true
+            }
+            for index in corners.indices where distance(point, corners[index]) <= cornerThreshold {
+                cornerHits[index] = true
+            }
+        }
+
+        let averageError = totalError / CGFloat(points.count)
+        guard edgeHits.allSatisfy({ $0 }),
+              cornerHits.allSatisfy({ $0 }),
+              averageError <= threshold else { return nil }
+        return .rectangle(bounds)
+    }
+
+    private static func recognizeTriangle(_ vertices: [CGPoint], diagonal: CGFloat) -> RecognizedShape? {
+        guard vertices.count == 3 else { return nil }
+        let perimeter = pathLength(vertices + [vertices[0]])
+        let area = abs(polygonArea(vertices))
+        guard perimeter >= diagonal * 1.8 else { return nil }
+        guard area >= diagonal * diagonal * 0.08 else { return nil }
+        return .triangle(vertices)
+    }
+
+    private static func recognizeEllipse(
+        _ points: [CGPoint],
+        bounds: CGRect,
+        diagonal: CGFloat
+    ) -> RecognizedShape? {
+        guard isClosed(points, diagonal: diagonal),
+              bounds.width >= 24,
+              bounds.height >= 24 else { return nil }
+
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let radiusX = bounds.width / 2
+        let radiusY = bounds.height / 2
+        guard radiusX > 0, radiusY > 0 else { return nil }
+
+        let averageError = points.map { point -> CGFloat in
+            let x = (point.x - center.x) / radiusX
+            let y = (point.y - center.y) / radiusY
+            return abs(sqrt(x * x + y * y) - 1)
+        }
+        .reduce(0, +) / CGFloat(points.count)
+
+        guard averageError <= 0.2 else { return nil }
+        return .ellipse(bounds)
+    }
+
+    private static func makeStroke(for shape: RecognizedShape, matching stroke: PKStroke) -> PKStroke {
+        let points = points(for: shape)
+        let template = stroke.path.first ?? PKStrokePoint(
+            location: points.first ?? .zero,
+            timeOffset: 0,
+            size: CGSize(width: 4, height: 4),
+            opacity: 1,
+            force: 1,
+            azimuth: 0,
+            altitude: .pi / 2
+        )
+
+        let controlPoints = points.enumerated().map { index, point in
+            PKStrokePoint(
+                location: point,
+                timeOffset: Double(index) * 0.01,
+                size: template.size,
+                opacity: template.opacity,
+                force: max(template.force, 1),
+                azimuth: template.azimuth,
+                altitude: template.altitude
+            )
+        }
+
+        let path = PKStrokePath(controlPoints: controlPoints, creationDate: Date())
+        return PKStroke(ink: stroke.ink, path: path, transform: stroke.transform, mask: nil)
+    }
+
+    private static func points(for shape: RecognizedShape) -> [CGPoint] {
+        switch shape {
+        case .line(let start, let end):
+            return sampledPolyline([start, end], closed: false)
+        case .rectangle(let rect):
+            let corners = [
+                CGPoint(x: rect.minX, y: rect.minY),
+                CGPoint(x: rect.maxX, y: rect.minY),
+                CGPoint(x: rect.maxX, y: rect.maxY),
+                CGPoint(x: rect.minX, y: rect.maxY)
+            ]
+            return sampledPolyline(corners, closed: true)
+        case .ellipse(let rect):
+            let count = 72
+            return (0...count).map { index in
+                let angle = CGFloat(index) / CGFloat(count) * .pi * 2
+                return CGPoint(
+                    x: rect.midX + cos(angle) * rect.width / 2,
+                    y: rect.midY + sin(angle) * rect.height / 2
+                )
+            }
+        case .triangle(let vertices):
+            return sampledPolyline(vertices, closed: true)
+        }
+    }
+
+    private static func sampledPolyline(
+        _ vertices: [CGPoint],
+        closed: Bool,
+        spacing: CGFloat = 12
+    ) -> [CGPoint] {
+        guard vertices.count >= 2 else { return vertices }
+        var result: [CGPoint] = []
+        let edgeCount = closed ? vertices.count : vertices.count - 1
+
+        for index in 0..<edgeCount {
+            let start = vertices[index]
+            let end = vertices[(index + 1) % vertices.count]
+            let length = distance(start, end)
+            let steps = max(1, Int(ceil(length / spacing)))
+            for step in 0..<steps {
+                let t = CGFloat(step) / CGFloat(steps)
+                result.append(CGPoint(
+                    x: start.x + (end.x - start.x) * t,
+                    y: start.y + (end.y - start.y) * t
+                ))
+            }
+        }
+
+        if closed, let first = result.first {
+            result.append(first)
+        } else if let last = vertices.last {
+            result.append(last)
+        }
+        return result
+    }
+
+    private static func simplify(_ points: [CGPoint], tolerance: CGFloat) -> [CGPoint] {
+        guard points.count > 2,
+              let first = points.first,
+              let last = points.last else { return points }
+
+        var maxDistance: CGFloat = 0
+        var maxIndex = 0
+        for index in 1..<(points.count - 1) {
+            let distance = distanceFromLine(point: points[index], start: first, end: last)
+            if distance > maxDistance {
+                maxDistance = distance
+                maxIndex = index
+            }
+        }
+
+        if maxDistance > tolerance {
+            let left = simplify(Array(points[0...maxIndex]), tolerance: tolerance)
+            let right = simplify(Array(points[maxIndex...]), tolerance: tolerance)
+            return left.dropLast() + right
+        }
+        return [first, last]
+    }
+
+    private static func simplifiedClosedVertices(_ points: [CGPoint], tolerance: CGFloat) -> [CGPoint] {
+        var loop = points
+        if let first = loop.first, let last = loop.last, distance(first, last) <= tolerance {
+            loop.removeLast()
+        }
+        guard loop.count > 3 else { return loop }
+
+        let split = farthestPair(in: loop)
+        let firstChain = chain(from: split.0, to: split.1, in: loop)
+        let secondChain = chain(from: split.1, to: split.0, in: loop)
+        let simplifiedFirst = simplify(firstChain, tolerance: tolerance)
+        let simplifiedSecond = simplify(secondChain, tolerance: tolerance)
+
+        let combined = Array(simplifiedFirst.dropLast()) + Array(simplifiedSecond.dropLast())
+        return removeNearbyVertices(combined, minDistance: max(8, tolerance * 0.7))
+    }
+
+    private static func farthestPair(in points: [CGPoint]) -> (Int, Int) {
+        var best = (0, min(points.count - 1, 1))
+        var bestDistance: CGFloat = 0
+
+        for left in points.indices {
+            for right in points.indices where right > left {
+                let candidate = distance(points[left], points[right])
+                if candidate > bestDistance {
+                    bestDistance = candidate
+                    best = (left, right)
+                }
+            }
+        }
+        return best
+    }
+
+    private static func chain(from start: Int, to end: Int, in points: [CGPoint]) -> [CGPoint] {
+        guard points.indices.contains(start), points.indices.contains(end) else { return points }
+        if start <= end {
+            return Array(points[start...end])
+        }
+        return Array(points[start...]) + Array(points[...end])
+    }
+
+    private static func removeNearbyVertices(_ vertices: [CGPoint], minDistance: CGFloat) -> [CGPoint] {
+        var result: [CGPoint] = []
+        for vertex in vertices {
+            guard let last = result.last else {
+                result.append(vertex)
+                continue
+            }
+            if distance(last, vertex) >= minDistance {
+                result.append(vertex)
+            }
+        }
+
+        if result.count > 1,
+           let first = result.first,
+           let last = result.last,
+           distance(first, last) < minDistance {
+            result.removeLast()
+        }
+        return result
+    }
+
+    private static func cleaned(_ points: [CGPoint]) -> [CGPoint] {
+        points.reduce(into: []) { result, point in
+            guard let last = result.last else {
+                result.append(point)
+                return
+            }
+            if distance(last, point) > 1.5 {
+                result.append(point)
+            }
+        }
+    }
+
+    private static func boundingRect(_ points: [CGPoint]) -> CGRect {
+        guard let first = points.first else { return .null }
+        var minX = first.x
+        var maxX = first.x
+        var minY = first.y
+        var maxY = first.y
+
+        for point in points.dropFirst() {
+            minX = min(minX, point.x)
+            maxX = max(maxX, point.x)
+            minY = min(minY, point.y)
+            maxY = max(maxY, point.y)
+        }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    private static func isClosed(_ points: [CGPoint], diagonal: CGFloat) -> Bool {
+        guard let first = points.first, let last = points.last else { return false }
+        return distance(first, last) <= max(18, diagonal * 0.22)
+    }
+
+    private static func pathLength(_ points: [CGPoint]) -> CGFloat {
+        guard points.count > 1 else { return 0 }
+        return zip(points, points.dropFirst()).map(distance).reduce(0, +)
+    }
+
+    private static func polygonArea(_ points: [CGPoint]) -> CGFloat {
+        guard points.count > 2 else { return 0 }
+        var total: CGFloat = 0
+        for index in points.indices {
+            let next = points[(index + 1) % points.count]
+            total += points[index].x * next.y - next.x * points[index].y
+        }
+        return total / 2
+    }
+
+    private static func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
+        let dx = a.x - b.x
+        let dy = a.y - b.y
+        return sqrt(dx * dx + dy * dy)
+    }
+
+    private static func distanceFromLine(point: CGPoint, start: CGPoint, end: CGPoint) -> CGFloat {
+        let length = distance(start, end)
+        guard length > 0 else { return distance(point, start) }
+        let numerator = abs(
+            (end.y - start.y) * point.x
+            - (end.x - start.x) * point.y
+            + end.x * start.y
+            - end.y * start.x
+        )
+        return numerator / length
     }
 }
 
@@ -284,6 +669,7 @@ struct DrawingCanvasView: UIViewRepresentable {
     /// ONLY recognized gestures are 3-finger horizontal swipes —
     /// right→left = next page, left→right = previous page.
     var isReadOnly: Bool = false
+    var eraserMode: EraserMode = .bitmap
     var canvasController: CanvasController
     var onErasePage: () -> Void
     var onNextPage:  () -> Void = {}   // 3-finger swipe up (edit) / swipe left (read-only)
@@ -465,11 +851,18 @@ struct DrawingCanvasView: UIViewRepresentable {
             } else {
                 canvas.tool = PKInkingTool(.marker, color: color, width: lineWidth)
             }
-        case .eraser:
-            if #available(iOS 16.4, *) {
-                canvas.tool = PKEraserTool(.bitmap, width: lineWidth)
+        case .shape:
+            if #available(iOS 17.0, *) {
+                canvas.tool = PKInkingTool(.monoline, color: color, width: lineWidth)
             } else {
+                canvas.tool = PKInkingTool(.pen, color: color, width: lineWidth)
+            }
+        case .eraser:
+            switch eraserMode {
+            case .stroke:
                 canvas.tool = PKEraserTool(.vector)
+            case .bitmap:
+                canvas.tool = PKEraserTool(.bitmap, width: lineWidth)
             }
         }
     }
@@ -488,8 +881,24 @@ struct DrawingCanvasView: UIViewRepresentable {
         /// Read-only page-turn swipes — enabled ONLY in read-only mode.
         var readingGestures: [UIGestureRecognizer] = []
         private var debounceTask: Task<Void, Never>?
+        private var shapeRecognitionTask: Task<Void, Never>?
+        private var shapeStartStrokeCount: Int?
+        private var pendingShapeRecognitionStartCount: Int?
 
         init(_ parent: DrawingCanvasView) { self.parent = parent }
+
+        func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
+            shapeStartStrokeCount = parent.toolType == .shape && !parent.isReadOnly
+                ? canvasView.drawing.strokes.count
+                : nil
+        }
+
+        func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
+            guard parent.toolType == .shape,
+                  let startCount = shapeStartStrokeCount else { return }
+            pendingShapeRecognitionStartCount = startCount
+            scheduleShapeRecognition(on: canvasView)
+        }
 
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
             let newDrawing = canvasView.drawing
@@ -499,6 +908,49 @@ struct DrawingCanvasView: UIViewRepresentable {
                 guard !Task.isCancelled else { return }
                 parent.drawing = newDrawing
             }
+            if parent.toolType == .shape, pendingShapeRecognitionStartCount != nil {
+                scheduleShapeRecognition(on: canvasView)
+            }
+        }
+
+        private func scheduleShapeRecognition(on canvasView: PKCanvasView) {
+            shapeRecognitionTask?.cancel()
+            shapeRecognitionTask = Task { @MainActor [weak self, weak canvasView] in
+                try? await Task.sleep(for: .milliseconds(160))
+                guard !Task.isCancelled,
+                      let self,
+                      let canvasView else { return }
+                self.applyShapeRecognitionIfNeeded(on: canvasView)
+            }
+        }
+
+        private func applyShapeRecognitionIfNeeded(on canvasView: PKCanvasView) {
+            guard let startCount = pendingShapeRecognitionStartCount else { return }
+            defer {
+                shapeStartStrokeCount = nil
+                pendingShapeRecognitionStartCount = nil
+            }
+
+            guard parent.toolType == .shape else { return }
+            var strokes = canvasView.drawing.strokes
+            guard strokes.count > startCount,
+                  let lastStroke = strokes.last,
+                  let recognizedStroke = ShapeRecognitionEngine.recognizedStroke(from: lastStroke) else { return }
+
+            strokes[strokes.count - 1] = recognizedStroke
+            replaceDrawing(on: canvasView, with: PKDrawing(strokes: strokes), actionName: "Recognize Shape")
+        }
+
+        private func replaceDrawing(on canvasView: PKCanvasView, with newDrawing: PKDrawing, actionName: String) {
+            guard canvasView.drawing != newDrawing else { return }
+            let previousDrawing = canvasView.drawing
+            canvasView.undoManager?.registerUndo(withTarget: self) { [weak canvasView] coordinator in
+                guard let canvasView else { return }
+                coordinator.replaceDrawing(on: canvasView, with: previousDrawing, actionName: actionName)
+            }
+            canvasView.undoManager?.setActionName(actionName)
+            canvasView.drawing = newDrawing
+            parent.drawing = newDrawing
         }
 
         // MARK: UIGestureRecognizerDelegate
