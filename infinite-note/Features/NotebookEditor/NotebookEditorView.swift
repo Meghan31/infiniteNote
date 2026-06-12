@@ -43,6 +43,15 @@ struct NotebookEditorView: View {
     @State private var showMoreTools = false
     @State private var eraserMode: EraserMode = .bitmap
     @State private var showEraserPopover = false
+
+    // Custom pen library (lives under the Pen tool)
+    @State private var showPenMenu = false
+    @State private var customPens: [CustomPen] = []
+    /// Active preset for the Pen tool — nil = the built-in Default Pen.
+    @State private var activePen: CustomPen?
+    @State private var penDesigner: PenDesignerRequest?
+    @State private var penToDelete: CustomPen?
+    private static let activePenKey = "infiniteNote.activePenId"
     /// Double-tap the size slider → numeric strength input (0–10) for the
     /// current tool.
     @State private var showStrengthInput = false
@@ -197,7 +206,10 @@ struct NotebookEditorView: View {
         .toolbar(isImmersive ? .hidden : .visible, for: .navigationBar)
         .statusBarHidden(isImmersive)
         .background(SidebarToggleHider().frame(width: 0, height: 0))
-        .onAppear { viewModel.load() }
+        .onAppear {
+            viewModel.load()
+            loadCustomPens()
+        }
         .onDisappear { viewModel.saveCurrentDrawing() }
         .sheet(isPresented: $showSyncSheet) {
             SyncView(
@@ -209,6 +221,16 @@ struct NotebookEditorView: View {
         // Share the notebook PDF — themed popup with share + save actions.
         .sheet(item: $sharePDFItem) { item in
             SharePDFView(notebook: notebook, pdfURL: item.url)
+        }
+        // Pen Designer — create or edit a custom pen.
+        .sheet(item: $penDesigner) { request in
+            PenDesignerView(
+                editing: request.editing,
+                seedColor: selectedColor,
+                seedWidth: currentSize,
+                onSave: { pen in handlePenSave(pen, isNew: request.editing == nil) },
+                onCancel: { penDesigner = nil }
+            )
         }
         // Download / save the notebook PDF to Files.
         .fileExporter(
@@ -230,6 +252,7 @@ struct NotebookEditorView: View {
         }
         .onChange(of: selectedTool) { _, tool in
             if tool != .eraser { showEraserPopover = false }
+            if tool != .pen { showPenMenu = false }
         }
         .confirmationDialog("Erase this page?", isPresented: $showErasePageConfirm, titleVisibility: .visible) {
             Button("Erase Page", role: .destructive) { viewModel.eraseCurrentPage() }
@@ -244,6 +267,19 @@ struct NotebookEditorView: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("Upload a PDF snapshot of this notebook to Supabase?")
+        }
+        // Custom pen delete — only after explicit confirmation.
+        .alert(
+            "Delete \u{201C}\(penToDelete?.name ?? "")\u{201D}?",
+            isPresented: Binding(
+                get: { penToDelete != nil },
+                set: { if !$0 { penToDelete = nil } }
+            )
+        ) {
+            Button("Cancel", role: .cancel) { penToDelete = nil }
+            Button("Delete", role: .destructive) { confirmDeletePen() }
+        } message: {
+            Text("This action cannot be undone.")
         }
         .alert("Error", isPresented: Binding(
             get: { viewModel.errorMessage != nil },
@@ -605,6 +641,7 @@ struct NotebookEditorView: View {
                     isDarkTheme: themeManager.isDark,
                     isReadOnly: isReadOnly,
                     eraserMode: eraserMode,
+                    penPreset: activePen,
                     canvasController: viewModel.canvasController,
                     onErasePage: { showErasePageConfirm = true },
                     onNextPage: { handleSwipeUpNext() },     // 3-finger up / read-only swipe left
@@ -873,6 +910,7 @@ struct NotebookEditorView: View {
                 if closesMoreTools { showMoreTools = false }
             }
             showEraserPopover = tool == .eraser
+            showPenMenu = tool == .pen
         } label: {
             toolGlyph(tool, isSelected: isSelected)
                 .frame(width: 39, height: 39)
@@ -885,10 +923,20 @@ struct NotebookEditorView: View {
                         .fill(isSelected ? themeManager.hardShadow.opacity(0.28) : Color.clear)
                         .offset(x: 2, y: 2.5)
                 )
+                // Custom-pen indicator: a small swatch in the pen slot shows
+                // a saved preset is armed (instead of the Default Pen).
+                .overlay(alignment: .bottomTrailing) {
+                    if tool == .pen, let pen = activePen {
+                        Circle().fill(pen.color)
+                            .frame(width: 10, height: 10)
+                            .overlay(Circle().strokeBorder(themeManager.outline, lineWidth: 1.2))
+                            .offset(x: -1, y: -1)
+                    }
+                }
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(tool.label)
+        .accessibilityLabel(tool == .pen ? (activePen?.name ?? "Default Pen") : tool.label)
 
         if tool == .eraser {
             button.popover(
@@ -898,9 +946,97 @@ struct NotebookEditorView: View {
             ) {
                 eraserPopover
             }
+        } else if tool == .pen {
+            button.popover(
+                isPresented: $showPenMenu,
+                attachmentAnchor: .rect(.bounds),
+                arrowEdge: .top
+            ) {
+                penLibraryPopover
+            }
         } else {
             button
         }
+    }
+
+    // MARK: - Pen Library
+
+    private var penLibraryPopover: some View {
+        PenLibraryMenu(
+            pens: customPens,
+            activePenId: activePen?.id,
+            onSelectDefault: { selectPen(nil) },
+            onSelect: { selectPen($0) },
+            onCreate: {
+                showPenMenu = false
+                penDesigner = PenDesignerRequest(editing: nil)
+            },
+            onEdit: { pen in
+                showPenMenu = false
+                penDesigner = PenDesignerRequest(editing: pen)
+            },
+            onDuplicate: { pen in
+                do {
+                    _ = try CustomPenService.shared.duplicate(pen)
+                    loadCustomPens()
+                } catch { viewModel.errorMessage = error.localizedDescription }
+            },
+            onDeleteRequest: { pen in
+                showPenMenu = false
+                penToDelete = pen
+            }
+        )
+    }
+
+    /// Activates a pen (nil = Default Pen): loads its color/width into the
+    /// toolbar, switches to the Pen tool, and remembers the choice across
+    /// launches.
+    private func selectPen(_ pen: CustomPen?) {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+            activePen = pen
+            selectedTool = .pen
+        }
+        if let pen {
+            selectedColor = pen.color
+            toolSizes[.pen] = CGFloat(pen.width)
+            UserDefaults.standard.set(pen.id, forKey: Self.activePenKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.activePenKey)
+        }
+        showPenMenu = false
+    }
+
+    private func loadCustomPens() {
+        customPens = (try? CustomPenService.shared.allPens()) ?? []
+        if let savedId = UserDefaults.standard.string(forKey: Self.activePenKey) {
+            activePen = customPens.first { $0.id == savedId }
+        }
+    }
+
+    private func handlePenSave(_ pen: CustomPen, isNew: Bool) {
+        do {
+            let saved = isNew
+                ? try CustomPenService.shared.create(pen)
+                : try CustomPenService.shared.update(pen)
+            loadCustomPens()
+            selectPen(saved)        // in the toolkit and writing immediately
+            penDesigner = nil
+        } catch {
+            viewModel.errorMessage = error.localizedDescription
+        }
+    }
+
+    private func confirmDeletePen() {
+        guard let pen = penToDelete else { return }
+        do {
+            try CustomPenService.shared.delete(pen)
+            customPens.removeAll { $0.id == pen.id }
+            // Deleting the active pen falls back to the Default Pen.
+            if activePen?.id == pen.id { selectPen(nil) }
+        } catch {
+            viewModel.errorMessage = error.localizedDescription
+        }
+        penToDelete = nil
     }
 
     private var eraserPopover: some View {

@@ -121,6 +121,38 @@ final class DatabaseManager: @unchecked Sendable {
             }
         }
 
+        // v8 — nested folders. Existing folders keep `parent_id == nil`,
+        // which makes them root folders on the Home grid.
+        migrator.registerMigration("v8_nested_folders") { db in
+            try db.alter(table: "folders") { t in
+                t.add(column: "parent_id", .text)
+                    .references("folders", onDelete: .cascade)
+            }
+        }
+
+        // v9 — custom pen presets (the Default Pen is a code constant, not a row)
+        migrator.registerMigration("v9_custom_pens") { db in
+            try db.create(table: "custom_pens", ifNotExists: true) { t in
+                t.column("id", .text).primaryKey()
+                t.column("name", .text).notNull()
+                t.column("color_hex", .text).notNull().defaults(to: "000000")
+                t.column("opacity", .double).notNull().defaults(to: 1)
+                t.column("width", .double).notNull().defaults(to: 3)
+                t.column("stabilization", .double).notNull().defaults(to: 0.5)
+                t.column("bezier_smoothing", .double).notNull().defaults(to: 0.5)
+                t.column("pressure_sensitivity", .double).notNull().defaults(to: 0.08)
+                t.column("start_taper", .double).notNull().defaults(to: 0.4)
+                t.column("end_taper", .double).notNull().defaults(to: 0.5)
+                t.column("ink_flow", .double).notNull().defaults(to: 1)
+                t.column("softness", .double).notNull().defaults(to: 0)
+                t.column("velocity_sensitivity", .double).notNull().defaults(to: 0.15)
+                t.column("min_width", .double).notNull().defaults(to: 1.5)
+                t.column("max_width", .double).notNull().defaults(to: 6)
+                t.column("created_at", .datetime).notNull()
+                t.column("updated_at", .datetime).notNull()
+            }
+        }
+
         try migrator.migrate(dbQueue)
     }
 }

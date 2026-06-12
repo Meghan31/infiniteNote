@@ -670,6 +670,10 @@ struct DrawingCanvasView: UIViewRepresentable {
     /// right→left = next page, left→right = previous page.
     var isReadOnly: Bool = false
     var eraserMode: EraserMode = .bitmap
+    /// Active pen preset for the `.pen` tool — nil means the built-in
+    /// Default Pen (handwriting-tuned). Drives both the live tool mapping
+    /// and the post-stroke refinement.
+    var penPreset: CustomPen? = nil
     var canvasController: CanvasController
     var onErasePage: () -> Void
     var onNextPage:  () -> Void = {}   // 3-finger swipe up (edit) / swipe left (read-only)
@@ -820,7 +824,11 @@ struct DrawingCanvasView: UIViewRepresentable {
     private func applyTool(to canvas: PKCanvasView) {
         switch toolType {
         case .pen:
-            canvas.tool = PKInkingTool(.pen, color: color, width: lineWidth)
+            // Default Pen or the selected custom preset — opacity/ink flow/
+            // softness live in the preset; stabilization, smoothing, tapers
+            // and pressure clamping are applied post-stroke by StrokeRefiner.
+            canvas.tool = (penPreset ?? CustomPen.defaultPen)
+                .inkingTool(color: color, width: lineWidth)
         case .pencil:
             canvas.tool = PKInkingTool(.pencil, color: color, width: lineWidth)
         case .marker:
@@ -884,6 +892,9 @@ struct DrawingCanvasView: UIViewRepresentable {
         private var shapeRecognitionTask: Task<Void, Never>?
         private var shapeStartStrokeCount: Int?
         private var pendingShapeRecognitionStartCount: Int?
+        private var penRefinementTask: Task<Void, Never>?
+        private var penStartStrokeCount: Int?
+        private var pendingPenRefinementStartCount: Int?
 
         init(_ parent: DrawingCanvasView) { self.parent = parent }
 
@@ -891,13 +902,20 @@ struct DrawingCanvasView: UIViewRepresentable {
             shapeStartStrokeCount = parent.toolType == .shape && !parent.isReadOnly
                 ? canvasView.drawing.strokes.count
                 : nil
+            penStartStrokeCount = parent.toolType == .pen && !parent.isReadOnly
+                ? canvasView.drawing.strokes.count
+                : nil
         }
 
         func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
-            guard parent.toolType == .shape,
-                  let startCount = shapeStartStrokeCount else { return }
-            pendingShapeRecognitionStartCount = startCount
-            scheduleShapeRecognition(on: canvasView)
+            if parent.toolType == .shape, let startCount = shapeStartStrokeCount {
+                pendingShapeRecognitionStartCount = startCount
+                scheduleShapeRecognition(on: canvasView)
+            }
+            if parent.toolType == .pen, let startCount = penStartStrokeCount {
+                pendingPenRefinementStartCount = startCount
+                schedulePenRefinement(on: canvasView)
+            }
         }
 
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
@@ -911,6 +929,44 @@ struct DrawingCanvasView: UIViewRepresentable {
             if parent.toolType == .shape, pendingShapeRecognitionStartCount != nil {
                 scheduleShapeRecognition(on: canvasView)
             }
+            if parent.toolType == .pen, pendingPenRefinementStartCount != nil {
+                schedulePenRefinement(on: canvasView)
+            }
+        }
+
+        // MARK: Pen refinement (Default Pen + custom presets)
+        //
+        // Mirrors the shape-recognition flow: when a pen stroke commits, the
+        // newest stroke is run through StrokeRefiner (stabilization, Bézier
+        // smoothing, pressure clamp, tapers, velocity thinning) and swapped
+        // in via the undo-registered replaceDrawing.
+
+        private func schedulePenRefinement(on canvasView: PKCanvasView) {
+            penRefinementTask?.cancel()
+            penRefinementTask = Task { @MainActor [weak self, weak canvasView] in
+                try? await Task.sleep(for: .milliseconds(120))
+                guard !Task.isCancelled,
+                      let self,
+                      let canvasView else { return }
+                self.applyPenRefinementIfNeeded(on: canvasView)
+            }
+        }
+
+        private func applyPenRefinementIfNeeded(on canvasView: PKCanvasView) {
+            guard let startCount = pendingPenRefinementStartCount else { return }
+            defer {
+                penStartStrokeCount = nil
+                pendingPenRefinementStartCount = nil
+            }
+
+            guard parent.toolType == .pen else { return }
+            var strokes = canvasView.drawing.strokes
+            guard strokes.count > startCount, let lastStroke = strokes.last else { return }
+
+            let pen = parent.penPreset ?? CustomPen.defaultPen
+            let refined = StrokeRefiner.refine(lastStroke, with: pen)
+            strokes[strokes.count - 1] = refined
+            replaceDrawing(on: canvasView, with: PKDrawing(strokes: strokes), actionName: "Refine Stroke")
         }
 
         private func scheduleShapeRecognition(on canvasView: PKCanvasView) {
