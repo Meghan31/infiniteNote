@@ -49,10 +49,12 @@ final class FolderService: @unchecked Sendable {
     func createFolder(
         name: String,
         colorIndex: Int,
+        parentId: String? = nil,
         imageData: Data? = nil,
         author: String? = nil
     ) throws -> Folder {
         var folder = Folder(
+            parentId: parentId,
             name: name,
             colorIndex: colorIndex,
             imagePath: imageData != nil ? "cover.jpg" : nil,
@@ -61,6 +63,9 @@ final class FolderService: @unchecked Sendable {
         try db.dbQueue.write { db in try folder.insert(db) }
         if let data = imageData {
             try storage.saveFolderImage(data, folderId: folder.id)
+        }
+        if let parentId {
+            try touch(folderId: parentId)
         }
         return folder
     }
@@ -101,12 +106,15 @@ final class FolderService: @unchecked Sendable {
         try update(folder.id, [Column("pinned").set(to: pinned)])
     }
 
-    /// Deletes the folder and its links — never the notebooks themselves.
-    /// DB row first (cascades the links), files after — a failed file
-    /// cleanup only orphans an image on disk.
+    /// Deletes the folder, descendant folders, and their links — never the
+    /// notebooks themselves. DB row first, files after — a failed file cleanup
+    /// only orphans images on disk.
     func deleteFolder(_ folder: Folder) throws {
+        let folderIds = try descendantFolderIds(including: folder.id)
         try db.dbQueue.write { db in _ = try folder.delete(db) }
-        storage.deleteFolderFiles(folderId: folder.id)
+        for folderId in folderIds {
+            storage.deleteFolderFiles(folderId: folderId)
+        }
     }
 
     // MARK: - Membership
@@ -134,7 +142,27 @@ final class FolderService: @unchecked Sendable {
     }
 
     private func touch(_ folder: Folder) throws {
-        try update(folder.id, [Column("updated_at").set(to: Date.now)])
+        try touch(folderId: folder.id)
+    }
+
+    private func touch(folderId: String) throws {
+        try update(folderId, [Column("updated_at").set(to: Date.now)])
+    }
+
+    private func descendantFolderIds(including rootId: String) throws -> Set<String> {
+        let folders = try allFolders()
+        var result: Set<String> = [rootId]
+        var changed = true
+
+        while changed {
+            changed = false
+            for folder in folders where folder.parentId.map(result.contains) == true && !result.contains(folder.id) {
+                result.insert(folder.id)
+                changed = true
+            }
+        }
+
+        return result
     }
 
     /// Column-scoped UPDATE on one folder row.

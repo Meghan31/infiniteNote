@@ -4,7 +4,7 @@ import PhotosUI
 // MARK: - Folder Icon (homepage grid item)
 //
 // A big cartoon folder: colored folder glyph with the hard "sticker" shadow,
-// the folder's custom image overlaid on the body, a notebook-count badge,
+// the folder's custom image overlaid on the body, an item-count badge,
 // and the name + optional author underneath.
 
 struct FolderIconView: View {
@@ -49,7 +49,7 @@ struct FolderIconView: View {
                         .allowsHitTesting(false)
                 }
 
-                // Notebook-count badge.
+                // Item-count badge.
                 Text("\(count)")
                     .font(.cartoon(12, weight: .heavy))
                     .foregroundStyle(.white)

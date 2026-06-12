@@ -50,7 +50,8 @@ final class NotebookListViewModel {
         defaultPageStyle: PageStyle = .grid,
         pageBackgroundData: Data? = nil,
         description: String? = nil,
-        author: String? = nil
+        author: String? = nil,
+        in folder: Folder? = nil
     ) {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -64,11 +65,19 @@ final class NotebookListViewModel {
                 description: description,
                 author: author
             )
+            if let folder {
+                try folderService.addNotebook(notebook.id, to: folder)
+                folderMemberships[folder.id, default: []].insert(notebook.id)
+                if let idx = folders.firstIndex(where: { $0.id == folder.id }) {
+                    folders[idx].updatedAt = .now
+                }
+            }
             notebooks.insert(notebook, at: 0)
             // Match the DB sort (pinned first, then recency) — a plain
             // insert(at: 0) put the new notebook ABOVE pinned ones until
             // the next reload.
             sortNotebooks()
+            sortFolders()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -225,13 +234,20 @@ final class NotebookListViewModel {
 
     // MARK: - Folders
 
-    func createFolder(name: String, colorIndex: Int, imageData: Data?, author: String?) {
+    func createFolder(name: String, colorIndex: Int, imageData: Data?, author: String?, parent: Folder? = nil) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         do {
             let folder = try folderService.createFolder(
-                name: trimmed, colorIndex: colorIndex, imageData: imageData, author: author
+                name: trimmed,
+                colorIndex: colorIndex,
+                parentId: parent?.id,
+                imageData: imageData,
+                author: author
             )
+            if let parent, let idx = folders.firstIndex(where: { $0.id == parent.id }) {
+                folders[idx].updatedAt = .now
+            }
             folders.insert(folder, at: 0)
             folderMemberships[folder.id] = []
             // Match the DB sort (pinned first, then recency) — a plain
@@ -256,10 +272,32 @@ final class NotebookListViewModel {
 
     func deleteFolder(_ folder: Folder) {
         do {
+            let ids = descendantFolderIds(including: folder.id)
             try folderService.deleteFolder(folder)
-            folders.removeAll { $0.id == folder.id }
-            folderMemberships[folder.id] = nil
+            folders.removeAll { ids.contains($0.id) }
+            for id in ids { folderMemberships[id] = nil }
         } catch { errorMessage = error.localizedDescription }
+    }
+
+    func rootFolders() -> [Folder] {
+        folders.filter { $0.parentId == nil }
+    }
+
+    func childFolders(in folder: Folder) -> [Folder] {
+        folders.filter { $0.parentId == folder.id }
+    }
+
+    func parentFolder(of folder: Folder) -> Folder? {
+        guard let parentId = folder.parentId else { return nil }
+        return folders.first { $0.id == parentId }
+    }
+
+    func itemCount(in folder: Folder) -> Int {
+        notebookCount(in: folder) + childFolders(in: folder).count
+    }
+
+    func isFolder(_ candidate: Folder, inside folder: Folder) -> Bool {
+        descendantFolderIds(including: folder.id).contains(candidate.id)
     }
 
     /// Notebooks inside `folder` — live from the notebooks array so cards
@@ -296,5 +334,20 @@ final class NotebookListViewModel {
             try folderService.removeNotebook(notebook.id, from: folder)
             folderMemberships[folder.id]?.remove(notebook.id)
         } catch { errorMessage = error.localizedDescription }
+    }
+
+    private func descendantFolderIds(including rootId: String) -> Set<String> {
+        var result: Set<String> = [rootId]
+        var changed = true
+
+        while changed {
+            changed = false
+            for folder in folders where folder.parentId.map(result.contains) == true && !result.contains(folder.id) {
+                result.insert(folder.id)
+                changed = true
+            }
+        }
+
+        return result
     }
 }

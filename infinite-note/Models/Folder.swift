@@ -7,6 +7,8 @@ import GRDB
 /// folder at most once (enforced by the join table's primary key).
 struct Folder: Identifiable, Hashable, Sendable {
     var id: String
+    /// nil means this is a root folder shown on the Home folder grid.
+    var parentId: String?
     var name: String
     /// Index into `Color.notebookCovers` for the folder tint.
     var colorIndex: Int
@@ -22,6 +24,7 @@ struct Folder: Identifiable, Hashable, Sendable {
 
     init(
         id: String = UUID().uuidString,
+        parentId: String? = nil,
         name: String,
         colorIndex: Int = Int.random(in: 0..<Color_notebookCoversCount),
         imagePath: String? = nil,
@@ -31,6 +34,7 @@ struct Folder: Identifiable, Hashable, Sendable {
         updatedAt: Date = .now
     ) {
         self.id = id
+        self.parentId = parentId
         self.name = name
         self.colorIndex = colorIndex
         self.imagePath = imagePath
@@ -52,6 +56,7 @@ extension Folder: FetchableRecord, MutablePersistableRecord {
 
     init(row: Row) throws {
         id = row["id"]
+        parentId = row["parent_id"]
         name = row["name"]
         colorIndex = row["color_index"] ?? 0
         imagePath = row["image_path"]
@@ -63,6 +68,7 @@ extension Folder: FetchableRecord, MutablePersistableRecord {
 
     func encode(to container: inout PersistenceContainer) throws {
         container["id"] = id
+        container["parent_id"] = parentId
         container["name"] = name
         container["color_index"] = colorIndex
         container["image_path"] = imagePath
