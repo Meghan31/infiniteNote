@@ -126,7 +126,7 @@ enum DrawingToolType: String, CaseIterable, Hashable {
     var assetName: String {
         switch self {
         case .pen:         return "pen"
-        case .customPen:   return "pen"        // same art; button adds a filled backing
+        case .customPen:   return "custom-pen" // dedicated artwork in Assets
         case .pencil:      return "pencil"
         case .fountainPen: return "feather-pen"
         case .monoline:    return "monoline"          // no art → SF fallback
@@ -802,7 +802,13 @@ struct DrawingCanvasView: UIViewRepresentable {
     func updateUIView(_ canvas: ManagedCanvasView, context: Context) {
         // Only update drawing when it actually differs (e.g. page switch).
         // Unconditional assignment would erase strokes drawn during the debounce window.
-        if canvas.drawing != drawing { canvas.drawing = drawing }
+        if canvas.drawing != drawing {
+            canvas.drawing = drawing
+            // External replacement (page switch/reload): everything now on
+            // the canvas is pre-existing ink — it must never be swept into
+            // custom-pen refinement.
+            context.coordinator.resetPenRefinementTracking(for: canvas)
+        }
 
         canvas.isRulerActive        = isRulerActive
         canvas.overrideUserInterfaceStyle = isDarkTheme ? .dark : .light
@@ -907,12 +913,28 @@ struct DrawingCanvasView: UIViewRepresentable {
         /// `canvas.drawing =` assignment CANCELS the live stroke, which is
         /// exactly how fast handwriting was losing strokes.
         private var isStrokeInFlight = false
-        /// `creationDate`s of strokes that must not be (re)refined: everything
-        /// that already existed when a custom-pen stroke began (loaded pages,
-        /// other tools' strokes) plus strokes already refined once.
+        /// Strokes already on the canvas when the latest custom-pen stroke
+        /// began. The diff against this identifies EXACTLY what the user just
+        /// drew — loaded pages, other tools' ink and eraser splits can never
+        /// leak into refinement. Re-snapshotted on every pen-down and on
+        /// every external drawing replacement (page switch).
+        private var penBaselineDates = Set<Date>()
+        /// Custom-pen strokes queued for refinement (identified by
+        /// `path.creationDate`, which survives refinement rebuilds).
+        private var pendingRefineDates = Set<Date>()
+        /// Strokes already refined once — never refined a second time.
         private var refinedStrokeDates = Set<Date>()
 
         init(_ parent: DrawingCanvasView) { self.parent = parent }
+
+        /// Hosting view replaced the drawing (page switch / reload):
+        /// everything now on the canvas is pre-existing ink — drop any queued
+        /// work and treat it all as off-limits for refinement.
+        func resetPenRefinementTracking(for canvasView: PKCanvasView) {
+            penRefinementTask?.cancel()
+            pendingRefineDates.removeAll()
+            penBaselineDates = Set(canvasView.drawing.strokes.map { $0.path.creationDate })
+        }
 
         func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
             isStrokeInFlight = true
@@ -920,11 +942,7 @@ struct DrawingCanvasView: UIViewRepresentable {
                 ? canvasView.drawing.strokes.count
                 : nil
             if parent.toolType == .customPen && !parent.isReadOnly {
-                // Freeze every pre-existing stroke so the catch-up pass below
-                // can only ever touch strokes drawn with the Custom Pen now.
-                for stroke in canvasView.drawing.strokes {
-                    refinedStrokeDates.insert(stroke.path.creationDate)
-                }
+                penBaselineDates = Set(canvasView.drawing.strokes.map { $0.path.creationDate })
             }
         }
 
@@ -935,6 +953,7 @@ struct DrawingCanvasView: UIViewRepresentable {
                 scheduleShapeRecognition(on: canvasView)
             }
             if parent.toolType == .customPen {
+                collectPendingPenStrokes(on: canvasView)
                 schedulePenRefinement(on: canvasView)
             }
         }
@@ -951,19 +970,33 @@ struct DrawingCanvasView: UIViewRepresentable {
                 scheduleShapeRecognition(on: canvasView)
             }
             // A stroke can commit to `.drawing` AFTER didEndUsingTool —
-            // re-arm the catch-up pass whenever the pen is idle.
+            // pick it up here, but only while the pen is up.
             if parent.toolType == .customPen, !isStrokeInFlight {
-                schedulePenRefinement(on: canvasView)
+                collectPendingPenStrokes(on: canvasView)
+                if !pendingRefineDates.isEmpty {
+                    schedulePenRefinement(on: canvasView)
+                }
             }
         }
 
         // MARK: Custom Pen refinement
         //
         // STROKE-SAFE catch-up design: refinement only ever runs while no
-        // stroke is in flight, and it refines ALL not-yet-refined custom-pen
-        // strokes in one pass. If the user writes fast (next stroke starts
-        // before the pass fires), the pass simply waits for the next pen-up —
-        // nothing is dropped, strokes are refined in batches between words.
+        // stroke is in flight, and only on strokes the user demonstrably drew
+        // with the Custom Pen (baseline diff). If the user writes fast, the
+        // pass waits for the next pen-up and refines the batch — nothing is
+        // ever dropped, and foreign ink is never touched.
+
+        /// Queues strokes drawn since the last pen-down. By construction the
+        /// queue can only ever contain custom-pen strokes from this session.
+        private func collectPendingPenStrokes(on canvasView: PKCanvasView) {
+            for stroke in canvasView.drawing.strokes {
+                let date = stroke.path.creationDate
+                if !penBaselineDates.contains(date), !refinedStrokeDates.contains(date) {
+                    pendingRefineDates.insert(date)
+                }
+            }
+        }
 
         private func schedulePenRefinement(on canvasView: PKCanvasView) {
             penRefinementTask?.cancel()
@@ -978,16 +1011,26 @@ struct DrawingCanvasView: UIViewRepresentable {
 
         private func applyPenRefinementIfNeeded(on canvasView: PKCanvasView) {
             // Never touch the drawing mid-stroke; the next pen-up reschedules.
-            guard parent.toolType == .customPen, !isStrokeInFlight else { return }
+            guard parent.toolType == .customPen,
+                  !isStrokeInFlight,
+                  !pendingRefineDates.isEmpty else { return }
+            // The Pencil can be back on the paper BEFORE PencilKit delivers
+            // didBeginUsingTool — the drawing gesture recognizer knows first.
+            // Replacing the drawing in that sliver cancels the new stroke.
+            switch canvasView.drawingGestureRecognizer.state {
+            case .began, .changed: return   // a stroke is starting; defer
+            default: break
+            }
 
             let pen = parent.penPreset ?? CustomPen.defaultPen
             var strokes = canvasView.drawing.strokes
             var changed = false
             for index in strokes.indices {
                 let date = strokes[index].path.creationDate
-                guard !refinedStrokeDates.contains(date) else { continue }
+                guard pendingRefineDates.contains(date) else { continue }
                 strokes[index] = StrokeRefiner.refine(strokes[index], with: pen)
                 refinedStrokeDates.insert(date)
+                pendingRefineDates.remove(date)
                 changed = true
             }
             guard changed else { return }
