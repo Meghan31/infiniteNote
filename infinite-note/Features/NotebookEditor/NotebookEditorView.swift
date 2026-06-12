@@ -101,7 +101,7 @@ struct NotebookEditorView: View {
         Color(red: 0.60, green: 0.34, blue: 0.12),
     ]
 
-    private let primaryTools: [DrawingToolType] = [.pen, .fountainPen, .eraser]
+    private let primaryTools: [DrawingToolType] = [.pen, .customPen, .fountainPen, .eraser]
     private var remainingTools: [DrawingToolType] {
         DrawingToolType.allCases.filter { !primaryTools.contains($0) }
     }
@@ -252,7 +252,7 @@ struct NotebookEditorView: View {
         }
         .onChange(of: selectedTool) { _, tool in
             if tool != .eraser { showEraserPopover = false }
-            if tool != .pen { showPenMenu = false }
+            if tool != .customPen { showPenMenu = false }
         }
         .confirmationDialog("Erase this page?", isPresented: $showErasePageConfirm, titleVisibility: .visible) {
             Button("Erase Page", role: .destructive) { viewModel.eraseCurrentPage() }
@@ -910,23 +910,31 @@ struct NotebookEditorView: View {
                 if closesMoreTools { showMoreTools = false }
             }
             showEraserPopover = tool == .eraser
-            showPenMenu = tool == .pen
+            showPenMenu = tool == .customPen
         } label: {
             toolGlyph(tool, isSelected: isSelected)
                 .frame(width: 39, height: 39)
                 .background(
-                    Circle()
-                        .fill(isSelected ? themeManager.selectionColor : Color.clear)
+                    // The Custom Pen slot ALWAYS has a full filled backing
+                    // (tinted by the active preset) so it's instantly
+                    // distinguishable from the normal pen next to it.
+                    Circle().fill(
+                        isSelected
+                            ? themeManager.selectionColor
+                            : (tool == .customPen
+                                ? (activePen?.color ?? Color.lightBronze).opacity(0.38)
+                                : Color.clear)
+                    )
                 )
                 .background(
                     Circle()
                         .fill(isSelected ? themeManager.hardShadow.opacity(0.28) : Color.clear)
                         .offset(x: 2, y: 2.5)
                 )
-                // Custom-pen indicator: a small swatch in the pen slot shows
-                // a saved preset is armed (instead of the Default Pen).
+                // Custom-pen indicator: a small swatch shows a saved preset
+                // is armed (instead of the built-in Default Pen).
                 .overlay(alignment: .bottomTrailing) {
-                    if tool == .pen, let pen = activePen {
+                    if tool == .customPen, let pen = activePen {
                         Circle().fill(pen.color)
                             .frame(width: 10, height: 10)
                             .overlay(Circle().strokeBorder(themeManager.outline, lineWidth: 1.2))
@@ -936,7 +944,7 @@ struct NotebookEditorView: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(tool == .pen ? (activePen?.name ?? "Default Pen") : tool.label)
+        .accessibilityLabel(tool == .customPen ? "Custom Pen: \(activePen?.name ?? "Default Pen")" : tool.label)
 
         if tool == .eraser {
             button.popover(
@@ -946,7 +954,7 @@ struct NotebookEditorView: View {
             ) {
                 eraserPopover
             }
-        } else if tool == .pen {
+        } else if tool == .customPen {
             button.popover(
                 isPresented: $showPenMenu,
                 attachmentAnchor: .rect(.bounds),
@@ -989,16 +997,16 @@ struct NotebookEditorView: View {
     }
 
     /// Activates a pen (nil = Default Pen): loads its color/width into the
-    /// toolbar, switches to the Pen tool, and remembers the choice across
-    /// launches.
+    /// toolbar, switches to the CUSTOM Pen tool, and remembers the choice
+    /// across launches. The normal Pen tool is never affected.
     private func selectPen(_ pen: CustomPen?) {
         withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
             activePen = pen
-            selectedTool = .pen
+            selectedTool = .customPen
         }
         if let pen {
             selectedColor = pen.color
-            toolSizes[.pen] = CGFloat(pen.width)
+            toolSizes[.customPen] = CGFloat(pen.width)
             UserDefaults.standard.set(pen.id, forKey: Self.activePenKey)
         } else {
             UserDefaults.standard.removeObject(forKey: Self.activePenKey)

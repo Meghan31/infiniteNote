@@ -426,18 +426,40 @@ private struct PenScribblePad: UIViewRepresentable {
     final class Coordinator: NSObject, PKCanvasViewDelegate {
         var pen: CustomPen
         var lastClearToken = 0
-        private var knownStrokeCount = 0
+        private var refinedDates = Set<Date>()
+        private var isStrokeInFlight = false
         private var isReplacing = false
 
         init(pen: CustomPen) { self.pen = pen }
 
+        func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
+            isStrokeInFlight = true
+        }
+
+        func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
+            isStrokeInFlight = false
+            refineCompletedStrokes(on: canvasView)
+        }
+
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
-            defer { knownStrokeCount = canvasView.drawing.strokes.count }
-            guard !isReplacing else { return }
+            // Replacing the drawing while a stroke is in flight would cancel
+            // that stroke — only refine between strokes (same rule as the
+            // page canvas).
+            guard !isReplacing, !isStrokeInFlight else { return }
+            refineCompletedStrokes(on: canvasView)
+        }
+
+        private func refineCompletedStrokes(on canvasView: PKCanvasView) {
             var strokes = canvasView.drawing.strokes
-            guard strokes.count == knownStrokeCount + 1,
-                  let last = strokes.last else { return }
-            strokes[strokes.count - 1] = StrokeRefiner.refine(last, with: pen)
+            var changed = false
+            for index in strokes.indices {
+                let date = strokes[index].path.creationDate
+                guard !refinedDates.contains(date) else { continue }
+                strokes[index] = StrokeRefiner.refine(strokes[index], with: pen)
+                refinedDates.insert(date)
+                changed = true
+            }
+            guard changed else { return }
             isReplacing = true
             canvasView.drawing = PKDrawing(strokes: strokes)
             isReplacing = false
