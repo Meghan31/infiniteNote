@@ -693,7 +693,13 @@ struct DrawingCanvasView: UIViewRepresentable {
         canvas.overrideUserInterfaceStyle = isDarkTheme ? .dark : .light
 
         // Only Apple Pencil draws; fingers are reserved for gestures.
+        // SIMULATOR has no Pencil — without this escape hatch the mouse
+        // draws nothing and every tool looks completely dead there.
+        #if targetEnvironment(simulator)
+        canvas.drawingPolicy = .anyInput
+        #else
         canvas.drawingPolicy = .pencilOnly
+        #endif
 
         canvas.delegate       = context.coordinator
         // contentSize is pinned to bounds.size in updateUIView — no scrolling in any direction.
@@ -968,6 +974,15 @@ struct DrawingCanvasView: UIViewRepresentable {
             }
             if parent.toolType == .shape, pendingShapeRecognitionStartCount != nil {
                 scheduleShapeRecognition(on: canvasView)
+            }
+            // A cancelled stroke (palm, system gesture) can skip
+            // didEndUsingTool and leave the in-flight flag stuck — the
+            // gesture recognizer is the ground truth, so self-heal here.
+            if isStrokeInFlight {
+                switch canvasView.drawingGestureRecognizer.state {
+                case .began, .changed: break          // genuinely drawing
+                default: isStrokeInFlight = false     // stale flag — clear it
+                }
             }
             // A stroke can commit to `.drawing` AFTER didEndUsingTool —
             // pick it up here, but only while the pen is up.
