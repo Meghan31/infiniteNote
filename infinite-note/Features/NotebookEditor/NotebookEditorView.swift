@@ -11,6 +11,9 @@ struct NotebookEditorView: View {
     let onGoHome: () -> Void
     let onToggleBooksSidebar: () -> Void
     var onSynced: (Date) -> Void = { _ in }
+    /// Fired after a notebook-level change (cover / default page style) so the
+    /// home screen can reload.
+    var onNotebookChanged: () -> Void = {}
 
     @State private var viewModel: NotebookEditorViewModel
     @State private var showSyncSheet = false
@@ -61,6 +64,12 @@ struct NotebookEditorView: View {
     @State private var showStylePicker = false
     @State private var pageStylePhotoItem: PhotosPickerItem?
 
+    // Insert a photo AS AN OBJECT on the page (not a background).
+    @State private var objectPhotoItem: PhotosPickerItem?
+
+    // Change the notebook's cover photo (from the page-style popover).
+    @State private var coverPhotoItem: PhotosPickerItem?
+
     // Home alert
     @State private var showHomeAlert = false
 
@@ -101,7 +110,9 @@ struct NotebookEditorView: View {
         Color(red: 0.60, green: 0.34, blue: 0.12),
     ]
 
-    private let primaryTools: [DrawingToolType] = [.pen, .customPen, .fountainPen, .eraser]
+    // Custom Pen + Lasso now live in the expanded toolkit (behind the arrow),
+    // alongside the insert-text / insert-photo buttons — the main bar stays lean.
+    private let primaryTools: [DrawingToolType] = [.pen, .fountainPen, .eraser]
     private var remainingTools: [DrawingToolType] {
         DrawingToolType.allCases.filter { !primaryTools.contains($0) }
     }
@@ -120,7 +131,8 @@ struct NotebookEditorView: View {
         onCloseNotebook: @escaping (Notebook) -> Void = { _ in },
         onGoHome: @escaping () -> Void = {},
         onToggleBooksSidebar: @escaping () -> Void = {},
-        onSynced: @escaping (Date) -> Void = { _ in }
+        onSynced: @escaping (Date) -> Void = { _ in },
+        onNotebookChanged: @escaping () -> Void = {}
     ) {
         self.notebook = notebook
         self.openNotebooks = openNotebooks
@@ -129,6 +141,7 @@ struct NotebookEditorView: View {
         self.onGoHome = onGoHome
         self.onToggleBooksSidebar = onToggleBooksSidebar
         self.onSynced = onSynced
+        self.onNotebookChanged = onNotebookChanged
         self._viewModel = State(initialValue: NotebookEditorViewModel(notebook: notebook))
     }
 
@@ -137,6 +150,13 @@ struct NotebookEditorView: View {
     // MARK: - Body
 
     var body: some View {
+        // Built in stages so the type-checker never has to solve one giant
+        // expression (a ~30-modifier chain timed out). Each helper applies a
+        // small subset of modifiers to the stage before it.
+        editorSheets(editorLifecycle(editorChrome(mainStack)))
+    }
+
+    private var mainStack: some View {
         VStack(spacing: 0) {
             if !isImmersive {
                 fileTabBar
@@ -147,146 +167,237 @@ struct NotebookEditorView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
 
-            HStack(spacing: 0) {
-                if showPageSidebar && !isImmersive {
-                    pageSidebar
-                        .transition(.move(edge: .leading).combined(with: .opacity))
-                }
-
-                ZStack(alignment: .leading) {
-                    paperCanvas
-                    if !isImmersive { pageFooter }
-                    if let hint = pageHintText {
-                        pageHintBubble(hint)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                            .allowsHitTesting(false)
-                            .transition(.scale(scale: 0.85).combined(with: .opacity))
-                    }
-                    // PDF render in progress (download / share) — generation
-                    // runs off-main; this is the visible feedback.
-                    if pdfExportAction != nil {
-                        exportProgressBubble
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                            .allowsHitTesting(false)
-                            .transition(.scale(scale: 0.85).combined(with: .opacity))
-                    }
-                    // Write-only extras: draggable tool + color switches, exit.
-                    if isFocusMode {
-                        FocusToolSwitch(selectedTool: $selectedTool)
-                            .transition(.opacity)
-                        FocusColorSwitch(color: $selectedColor, presets: presetColors)
-                            .transition(.opacity)
-                        floatingExitButton(
-                            icon: "arrow.down.right.and.arrow.up.left",
-                            label: "Exit write-only mode"
-                        ) {
-                            withAnimation(.easeOut(duration: 0.25)) { isFocusMode = false }
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                        .transition(.scale(scale: 0.8).combined(with: .opacity))
-                    } else if isReadOnly {
-                        // Full-screen reading: the floating eye exits.
-                        floatingExitButton(icon: "eye.fill", label: "Exit read-only mode") {
-                            withAnimation(.easeOut(duration: 0.25)) { isReadOnly = false }
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                        .transition(.scale(scale: 0.8).combined(with: .opacity))
-                    }
-                }
-            }
+            editorWorkspace
         }
         .background(themeManager.background)
-        .navigationTitle(notebook.title)
-        .navigationBarTitleDisplayMode(.inline)
-        .navigationBarBackButtonHidden(true)
-        .toolbar { editorToolbar }
-        .toolbar(removing: .sidebarToggle)
-        // Immersive (write-only / read-only) modes: navigation bar and
-        // status bar go away too.
-        .toolbar(isImmersive ? .hidden : .visible, for: .navigationBar)
-        .statusBarHidden(isImmersive)
-        .background(SidebarToggleHider().frame(width: 0, height: 0))
-        .onAppear {
-            viewModel.load()
-            loadCustomPens()
-        }
-        .onDisappear { viewModel.saveCurrentDrawing() }
-        .sheet(isPresented: $showSyncSheet) {
-            SyncView(
-                notebook: notebook,
-                canvasSize: viewModel.canvasController.canvasView?.bounds.size,
-                onSynced: onSynced
-            )
-        }
-        // Share the notebook PDF — themed popup with share + save actions.
-        .sheet(item: $sharePDFItem) { item in
-            SharePDFView(notebook: notebook, pdfURL: item.url)
-        }
-        // Pen Designer — create or edit a custom pen.
-        .sheet(item: $penDesigner) { request in
-            PenDesignerView(
-                editing: request.editing,
-                seedColor: selectedColor,
-                seedWidth: currentSize,
-                onSave: { pen in handlePenSave(pen, isNew: request.editing == nil) },
-                onCancel: { penDesigner = nil }
-            )
-        }
-        // Download / save the notebook PDF to Files.
-        .fileExporter(
-            isPresented: $showPDFExporter,
-            document: exportDocument,
-            contentType: .pdf,
-            defaultFilename: notebook.title.sanitizedFilename
-        ) { result in
-            if case .failure(let error) = result { viewModel.errorMessage = error.localizedDescription }
-        }
-        .onChange(of: pageStylePhotoItem) { _, item in
-            guard let item else { return }
-            Task {
-                if let data = try? await item.loadTransferable(type: Data.self) {
-                    viewModel.setPageStyle(.photo, backgroundImageData: data)
+    }
+
+    /// Navigation bar / toolbar / status bar chrome.
+    private func editorChrome<V: View>(_ content: V) -> some View {
+        content
+            .navigationTitle(notebook.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .navigationBarBackButtonHidden(true)
+            .toolbar { editorToolbar }
+            .toolbar(removing: .sidebarToggle)
+            // Immersive (write-only / read-only) modes: navigation bar and
+            // status bar go away too.
+            .toolbar(isImmersive ? .hidden : .visible, for: .navigationBar)
+            .statusBarHidden(isImmersive)
+            .background(SidebarToggleHider().frame(width: 0, height: 0))
+    }
+
+    /// Lifecycle + onChange hooks.
+    private func editorLifecycle<V: View>(_ content: V) -> some View {
+        content
+            .onAppear {
+                // Set the theme BEFORE load() so new text seeds a visible colour.
+                viewModel.isDarkTheme = themeManager.isDark
+                viewModel.onNotebookChanged = onNotebookChanged
+                viewModel.load()
+                loadCustomPens()
+            }
+            .onDisappear {
+                viewModel.commitPendingEdits()
+                viewModel.saveCurrentDrawing()
+            }
+            // Apply a newly picked notebook cover photo.
+            .onChange(of: coverPhotoItem) { _, item in
+                guard let item else { return }
+                showStylePicker = false
+                Task {
+                    if let data = try? await item.loadTransferable(type: Data.self) {
+                        viewModel.updateCoverImage(data)
+                    }
+                    coverPhotoItem = nil
                 }
-                pageStylePhotoItem = nil
+            }
+            .onChange(of: themeManager.isDark) { _, dark in
+                viewModel.isDarkTheme = dark
+            }
+            // Load a picked photo and drop it onto the page as a movable object.
+            .onChange(of: objectPhotoItem) { _, item in
+                guard let item else { return }
+                Task {
+                    if let data = try? await item.loadTransferable(type: Data.self),
+                       let img = UIImage(data: data) {
+                        viewModel.editController.insertPhoto(img)
+                        selectedTool = .lasso
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.72)) {
+                            showMoreTools = false
+                        }
+                    }
+                    objectPhotoItem = nil
+                }
+            }
+            .onChange(of: pageStylePhotoItem) { _, item in
+                guard let item else { return }
+                Task {
+                    if let data = try? await item.loadTransferable(type: Data.self) {
+                        viewModel.setPageStyle(.photo, backgroundImageData: data)
+                    }
+                    pageStylePhotoItem = nil
+                }
+            }
+            .onChange(of: selectedTool) { _, tool in
+                if tool != .eraser { showEraserPopover = false }
+                if tool != .customPen { showPenMenu = false }
+                // Leaving the lasso commits any lifted ink / open text box so
+                // it's never stranded off-canvas.
+                if tool != .lasso { viewModel.commitPendingEdits() }
+            }
+            .onChange(of: isReadOnly) { _, readOnly in
+                if readOnly { viewModel.commitPendingEdits() }
+            }
+            .onChange(of: isFocusMode) { _, focus in
+                if focus { viewModel.commitPendingEdits() }
+            }
+    }
+
+    /// Sheets, file exporter, dialogs and alerts.
+    private func editorSheets<V: View>(_ content: V) -> some View {
+        content
+            .sheet(isPresented: $showSyncSheet) {
+                SyncView(
+                    notebook: notebook,
+                    canvasSize: viewModel.canvasController.canvasView?.bounds.size,
+                    onSynced: onSynced
+                )
+            }
+            // Share the notebook PDF — themed popup with share + save actions.
+            .sheet(item: $sharePDFItem) { item in
+                SharePDFView(notebook: notebook, pdfURL: item.url)
+            }
+            // Pen Designer — create or edit a custom pen.
+            .sheet(item: $penDesigner) { request in
+                PenDesignerView(
+                    editing: request.editing,
+                    seedColor: selectedColor,
+                    seedWidth: currentSize,
+                    onSave: { pen in handlePenSave(pen, isNew: request.editing == nil) },
+                    onCancel: { penDesigner = nil }
+                )
+            }
+            // Download / save the notebook PDF to Files.
+            .fileExporter(
+                isPresented: $showPDFExporter,
+                document: exportDocument,
+                contentType: .pdf,
+                defaultFilename: notebook.title.sanitizedFilename
+            ) { result in
+                if case .failure(let error) = result { viewModel.errorMessage = error.localizedDescription }
+            }
+            .confirmationDialog("Erase this page?", isPresented: $showErasePageConfirm, titleVisibility: .visible) {
+                Button("Erase Page", role: .destructive) { viewModel.eraseCurrentPage() }
+                Button("Cancel", role: .cancel) { }
+            } message: { Text("All strokes on this page will be removed.") }
+            .alert("Close all files?", isPresented: $showHomeAlert) {
+                Button("Close All", role: .destructive) { onGoHome() }
+                Button("Cancel", role: .cancel) { }
+            } message: { Text("Going home will close all open files.") }
+            .alert("Sync notebook?", isPresented: $showSyncConfirm) {
+                Button("Yes") { confirmSyncNotebook() }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("Upload a PDF snapshot of this notebook to Supabase?")
+            }
+            // Custom pen delete — only after explicit confirmation.
+            .alert(
+                "Delete \u{201C}\(penToDelete?.name ?? "")\u{201D}?",
+                isPresented: Binding(
+                    get: { penToDelete != nil },
+                    set: { if !$0 { penToDelete = nil } }
+                )
+            ) {
+                Button("Cancel", role: .cancel) { penToDelete = nil }
+                Button("Delete", role: .destructive) { confirmDeletePen() }
+            } message: {
+                Text("This action cannot be undone.")
+            }
+            .alert("Error", isPresented: Binding(
+                get: { viewModel.errorMessage != nil },
+                set: { if !$0 { viewModel.errorMessage = nil } }
+            )) {
+                Button("OK") { viewModel.errorMessage = nil }
+            } message: { Text(viewModel.errorMessage ?? "") }
+    }
+
+    /// Sidebar + paper canvas + overlays — extracted from `body` to keep each
+    /// type-checked expression small.
+    private var editorWorkspace: some View {
+        HStack(spacing: 0) {
+            if showPageSidebar && !isImmersive {
+                pageSidebar
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+            }
+
+            ZStack(alignment: .leading) {
+                paperCanvas
+                canvasOverlays
             }
         }
-        .onChange(of: selectedTool) { _, tool in
-            if tool != .eraser { showEraserPopover = false }
-            if tool != .customPen { showPenMenu = false }
+    }
+
+    // MARK: - Canvas Overlays
+    //
+    // Extracted from `body` so the type-checker isn't asked to solve one giant
+    // expression (which timed out). Each overlay is its own small builder.
+
+    @ViewBuilder
+    private var canvasOverlays: some View {
+        if !isImmersive { pageFooter }
+
+        if let hint = pageHintText {
+            pageHintBubble(hint)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .allowsHitTesting(false)
+                .transition(.scale(scale: 0.85).combined(with: .opacity))
         }
-        .confirmationDialog("Erase this page?", isPresented: $showErasePageConfirm, titleVisibility: .visible) {
-            Button("Erase Page", role: .destructive) { viewModel.eraseCurrentPage() }
-            Button("Cancel", role: .cancel) { }
-        } message: { Text("All strokes on this page will be removed.") }
-        .alert("Close all files?", isPresented: $showHomeAlert) {
-            Button("Close All", role: .destructive) { onGoHome() }
-            Button("Cancel", role: .cancel) { }
-        } message: { Text("Going home will close all open files.") }
-        .alert("Sync notebook?", isPresented: $showSyncConfirm) {
-            Button("Yes") { confirmSyncNotebook() }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("Upload a PDF snapshot of this notebook to Supabase?")
+
+        if pdfExportAction != nil {
+            exportProgressBubble
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .allowsHitTesting(false)
+                .transition(.scale(scale: 0.85).combined(with: .opacity))
         }
-        // Custom pen delete — only after explicit confirmation.
-        .alert(
-            "Delete \u{201C}\(penToDelete?.name ?? "")\u{201D}?",
-            isPresented: Binding(
-                get: { penToDelete != nil },
-                set: { if !$0 { penToDelete = nil } }
+
+        if viewModel.editController.editingObjectId != nil {
+            TextFormatBar(
+                controller: viewModel.editController.textController,
+                onDone: { viewModel.editController.endEditing(commit: true) }
             )
-        ) {
-            Button("Cancel", role: .cancel) { penToDelete = nil }
-            Button("Delete", role: .destructive) { confirmDeletePen() }
-        } message: {
-            Text("This action cannot be undone.")
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .padding(.top, 10)
+            .transition(.move(edge: .top).combined(with: .opacity))
         }
-        .alert("Error", isPresented: Binding(
-            get: { viewModel.errorMessage != nil },
-            set: { if !$0 { viewModel.errorMessage = nil } }
-        )) {
-            Button("OK") { viewModel.errorMessage = nil }
-        } message: { Text(viewModel.errorMessage ?? "") }
+
+        immersiveOverlays
+    }
+
+    /// Write-only / read-only floating controls.
+    @ViewBuilder
+    private var immersiveOverlays: some View {
+        if isFocusMode {
+            FocusToolSwitch(selectedTool: $selectedTool)
+                .transition(.opacity)
+            FocusColorSwitch(color: $selectedColor, presets: presetColors)
+                .transition(.opacity)
+            floatingExitButton(
+                icon: "arrow.down.right.and.arrow.up.left",
+                label: "Exit write-only mode"
+            ) {
+                withAnimation(.easeOut(duration: 0.25)) { isFocusMode = false }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .transition(.scale(scale: 0.8).combined(with: .opacity))
+        } else if isReadOnly {
+            floatingExitButton(icon: "eye.fill", label: "Exit read-only mode") {
+                withAnimation(.easeOut(duration: 0.25)) { isReadOnly = false }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .transition(.scale(scale: 0.8).combined(with: .opacity))
+        }
     }
 
     // MARK: - File Tab Bar
@@ -372,6 +483,44 @@ struct NotebookEditorView: View {
     }
 
     private var editingToolbarRow: some View {
+        Group {
+            if showMoreTools {
+                // Expanded toolkit OWNS the whole bar: every other control is
+                // hidden and the tools live in a horizontal scroller, so the
+                // row can never run past the iPad edge (which used to trim the
+                // page sidebar).
+                expandedToolsRow
+            } else {
+                collapsedToolbarRow
+            }
+        }
+        .frame(height: 62)
+        .background(themeManager.card)
+    }
+
+    /// Full-width, tools-only row shown while the toolkit is expanded.
+    private var expandedToolsRow: some View {
+        HStack(spacing: 6) {
+            // Collapse back to the compact bar.
+            moreToolsButton
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(DrawingToolType.allCases, id: \.self) { tool in
+                        toolButton(tool, closesMoreTools: true)
+                    }
+                    expandedInsertTextButton
+                    expandedInsertPhotoButton
+                }
+                .padding(.horizontal, 6)
+            }
+            .frame(height: 50)
+        }
+        .padding(.horizontal, 8)
+        .transition(.opacity)
+    }
+
+    private var collapsedToolbarRow: some View {
         HStack(spacing: 0) {
                 // Sidebar toggle — hidden while the toolkit is expanded so the
                 // extra pens never trim the buttons at either end of the bar.
@@ -411,7 +560,12 @@ struct NotebookEditorView: View {
 
                 Spacer(minLength: 0)
 
-                toolbarDivider
+                // Only Paste stays in the main bar — text/photo inserts moved
+                // into the expanded toolkit. Hidden while the kit is expanded.
+                if !showMoreTools {
+                    pasteButton
+                    toolbarDivider
+                }
 
                 // Page style
                 Button { showStylePicker.toggle() } label: {
@@ -521,44 +675,89 @@ struct NotebookEditorView: View {
         let tint = themeManager.iconTint
         let selection = themeManager.selectionColor
         let isPhotoStyle = viewModel.currentPageStyle == .photo
-        return VStack(alignment: .leading, spacing: 14) {
-            Text("Page Style")
-                .font(.cartoon(14, weight: .heavy)).foregroundStyle(tint)
-            let nonPhotoStyles: [PageStyle] = [.plain, .ruled, .dots, .grid]
-            let cols = Array(repeating: GridItem(.flexible(), spacing: 10), count: 2)
-            LazyVGrid(columns: cols, spacing: 10) {
-                ForEach(nonPhotoStyles, id: \.self) { styleCard($0) }
-            }
-            Divider()
-            PhotosPicker(selection: $pageStylePhotoItem, matching: .images, photoLibrary: .shared()) {
-                HStack(spacing: 10) {
-                    Image(systemName: "photo").font(.system(size: 15, weight: .semibold)).foregroundStyle(tint)
-                    Text("Import Photo as Background")
-                        .font(.cartoon(13, weight: .semibold)).foregroundStyle(tint)
-                    Spacer()
-                    if isPhotoStyle {
-                        Image(systemName: "checkmark.circle.fill").foregroundStyle(tint)
-                    }
+        let nonPhotoStyles: [PageStyle] = [.plain, .ruled, .dots, .grid]
+        let cols = Array(repeating: GridItem(.flexible(), spacing: 10), count: 2)
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                // ── This page ──────────────────────────────────────────
+                Text("This Page")
+                    .font(.cartoon(14, weight: .heavy)).foregroundStyle(tint)
+                LazyVGrid(columns: cols, spacing: 10) {
+                    ForEach(nonPhotoStyles, id: \.self) { styleCard($0) }
                 }
-                .padding(12)
-                .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(selection.opacity(0.18))
-                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(isPhotoStyle ? selection : Color.clear, lineWidth: 2)))
+                PhotosPicker(selection: $pageStylePhotoItem, matching: .images, photoLibrary: .shared()) {
+                    popoverRow(icon: "photo", title: "Import Photo as Background",
+                               tint: tint, selection: selection, checked: isPhotoStyle)
+                }
+                .buttonStyle(.plain)
+                .onChange(of: pageStylePhotoItem) { _, _ in showStylePicker = false }
+
+                Divider()
+
+                // ── Default for NEW pages ──────────────────────────────
+                Text("New Pages")
+                    .font(.cartoon(14, weight: .heavy)).foregroundStyle(tint)
+                Text("Pages you add from now on use this style. Existing pages don't change.")
+                    .font(.cartoon(11, weight: .medium))
+                    .foregroundStyle(themeManager.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                LazyVGrid(columns: cols, spacing: 10) {
+                    ForEach(nonPhotoStyles, id: \.self) { defaultStyleCard($0) }
+                }
+
+                Divider()
+
+                // ── Notebook cover ─────────────────────────────────────
+                Text("Notebook")
+                    .font(.cartoon(14, weight: .heavy)).foregroundStyle(tint)
+                PhotosPicker(selection: $coverPhotoItem, matching: .images, photoLibrary: .shared()) {
+                    popoverRow(icon: "photo.on.rectangle", title: "Change Cover Photo",
+                               tint: tint, selection: selection, checked: false)
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
-            .onChange(of: pageStylePhotoItem) { _, _ in showStylePicker = false }
+            .padding(16)
         }
-        .padding(16).frame(width: 280)
+        .frame(width: 300)
+        .frame(maxHeight: 580)
         .modifier(ForcePopoverAdaptation())
     }
 
+    /// Shared pill row used by the photo / cover pickers in the popover.
+    /// `nonisolated` so it can be built inside PhotosPicker's nonisolated label
+    /// closure; it only uses its (Sendable) parameters, never `self`.
+    private nonisolated func popoverRow(icon: String, title: String, tint: Color, selection: Color, checked: Bool) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon).font(.system(size: 15, weight: .semibold)).foregroundStyle(tint)
+            Text(title).font(.cartoon(13, weight: .semibold)).foregroundStyle(tint)
+            Spacer()
+            if checked { Image(systemName: "checkmark.circle.fill").foregroundStyle(tint) }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(selection.opacity(0.18))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(checked ? selection : Color.clear, lineWidth: 2)))
+    }
+
+    /// Card for the CURRENT page's style.
     private func styleCard(_ style: PageStyle) -> some View {
-        let isSelected = viewModel.currentPageStyle == style
-        return Button {
+        styleCardButton(style, isSelected: viewModel.currentPageStyle == style) {
             viewModel.setPageStyle(style)
             showStylePicker = false
-        } label: {
+        }
+    }
+
+    /// Card for the notebook's DEFAULT (new-page) style. Doesn't dismiss the
+    /// popover, so the selection highlight updates in place.
+    private func defaultStyleCard(_ style: PageStyle) -> some View {
+        styleCardButton(style, isSelected: viewModel.notebook.defaultPageStyle == style) {
+            viewModel.setDefaultPageStyle(style)
+        }
+    }
+
+    private func styleCardButton(_ style: PageStyle, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
             VStack(spacing: 8) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -632,6 +831,9 @@ struct NotebookEditorView: View {
                                     geo.size.height / PaperSpec.size.height))
             ZStack {
                 canvasBackground
+                // Placed objects (photos + text) live BELOW the ink so the
+                // Pencil writes straight onto them.
+                PageObjectsContentView(controller: viewModel.editController)
                 DrawingCanvasView(
                     drawing: Binding(get: { viewModel.drawing }, set: { viewModel.onDrawingChanged($0) }),
                     isRulerActive: viewModel.isRulerActive,
@@ -642,11 +844,21 @@ struct NotebookEditorView: View {
                     isReadOnly: isReadOnly,
                     eraserMode: eraserMode,
                     penPreset: activePen,
+                    loadToken: viewModel.drawingLoadToken,
                     canvasController: viewModel.canvasController,
                     onErasePage: { showErasePageConfirm = true },
                     onNextPage: { handleSwipeUpNext() },     // 3-finger up / read-only swipe left
                     onPrevPage: { handleSwipeDownPrev() }    // 3-finger down / read-only swipe right
                 )
+                // Selection/lasso interaction sits ABOVE the ink and is active
+                // only while the Lasso tool is selected.
+                if selectedTool == .lasso && !isReadOnly {
+                    PageSelectionOverlay(
+                        controller: viewModel.editController,
+                        displayScale: fit,
+                        isDark: themeManager.isDark
+                    )
+                }
             }
             .frame(width: PaperSpec.size.width, height: PaperSpec.size.height)
             // Thin paper edge so the sheet reads against the desk background.
@@ -826,6 +1038,12 @@ struct NotebookEditorView: View {
                     toolButton($0, closesMoreTools: true)
                 }
                 .transition(.move(edge: .trailing).combined(with: .opacity))
+
+                // Insert-object buttons live in the expanded kit too.
+                expandedInsertTextButton
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                expandedInsertPhotoButton
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
         .padding(.horizontal, 9)
@@ -1322,6 +1540,59 @@ struct NotebookEditorView: View {
         Rectangle().fill(themeManager.border.opacity(0.7)).frame(width: 0.5, height: 26)
     }
 
+    // MARK: - Insert Buttons (text / photo objects + paste)
+
+    /// Paste — the only insert action left in the main toolbar.
+    private var pasteButton: some View {
+        Button {
+            viewModel.editController.paste()
+            selectedTool = .lasso
+        } label: {
+            Image(systemName: "doc.on.clipboard")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(themeManager.iconTint)
+                .frame(width: 40, height: 44)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Paste")
+    }
+
+    /// Insert a text box — lives in the expanded toolkit. Styled like a tool
+    /// glyph so it sits naturally next to the pens.
+    private var expandedInsertTextButton: some View {
+        Button {
+            viewModel.editController.insertTextBox()
+            selectedTool = .lasso          // select mode so it's editable
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.72)) {
+                showMoreTools = false
+            }
+        } label: {
+            Image(systemName: "textbox")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(themeManager.iconTint)
+                .frame(width: 39, height: 39)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Insert text box")
+    }
+
+    /// Insert a photo — lives in the expanded toolkit.
+    private var expandedInsertPhotoButton: some View {
+        // PhotosPicker's label closure is nonisolated, so capture the Sendable
+        // Color here (on the main actor) instead of touching ThemeManager inside.
+        let tint = themeManager.iconTint
+        return PhotosPicker(selection: $objectPhotoItem, matching: .images, photoLibrary: .shared()) {
+            Image(systemName: "photo.badge.plus")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 39, height: 39)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Insert photo")
+    }
+
     private func toolbarActionButton(icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon).font(.system(size: 16, weight: .bold))
@@ -1427,6 +1698,7 @@ struct NotebookEditorView: View {
     }
 
     private func confirmSyncNotebook() {
+        viewModel.commitPendingEdits()
         viewModel.saveCurrentDrawing()
         showSyncSheet = true
     }
@@ -1444,6 +1716,7 @@ struct NotebookEditorView: View {
     private func startPDFExport(_ action: PDFExportAction) {
         guard pdfExportAction == nil else { return }   // one export at a time
         // Persist in-flight strokes before the background render reads disk.
+        viewModel.commitPendingEdits()
         viewModel.saveCurrentDrawing()
         withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
             pdfExportAction = action
@@ -1708,7 +1981,7 @@ private struct FocusToolSwitch: View {
 // compact widths), so the color / page-style pickers always drop down from the
 // toolbar and show their full content.
 
-private struct ForcePopoverAdaptation: ViewModifier {
+struct ForcePopoverAdaptation: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 16.4, *) {
             content.presentationCompactAdaptation(.popover)

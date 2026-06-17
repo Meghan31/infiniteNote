@@ -97,6 +97,15 @@ final class NotebookService: @unchecked Sendable {
         try update(notebook.id, [Column("last_synced_at").set(to: nil)])
     }
 
+    /// Sets the style applied to every NEW page added from now on. Existing
+    /// pages keep their own style.
+    func updateDefaultPageStyle(_ style: PageStyle, for notebook: Notebook) throws {
+        try update(notebook.id, [
+            Column("default_page_style").set(to: style.rawValue),
+            Column("updated_at").set(to: Date.now)
+        ])
+    }
+
     /// Updates the optional PDF-cover details (description / author).
     func updateDetails(description: String?, author: String?, for notebook: Notebook) throws {
         try update(notebook.id, [

@@ -24,7 +24,7 @@ enum EraserMode: String, CaseIterable, Hashable {
 // MARK: - Drawing Tool Type
 
 enum DrawingToolType: String, CaseIterable, Hashable {
-    case pen, customPen, pencil, fountainPen, monoline, marker, crayon, watercolor, highlighter, shape, eraser
+    case pen, customPen, pencil, fountainPen, monoline, marker, crayon, watercolor, highlighter, shape, lasso, eraser
 
     var label: String {
         switch self {
@@ -38,6 +38,7 @@ enum DrawingToolType: String, CaseIterable, Hashable {
         case .watercolor:  return "Watercolor"
         case .highlighter: return "Highlight"
         case .shape:       return "Shape"
+        case .lasso:       return "Lasso"
         case .eraser:      return "Eraser"
         }
     }
@@ -54,9 +55,14 @@ enum DrawingToolType: String, CaseIterable, Hashable {
         case .watercolor:  return "drop.fill"
         case .highlighter: return "highlighter"
         case .shape:       return "square.on.circle"
+        case .lasso:       return "lasso"
         case .eraser:      return "eraser.fill"
         }
     }
+
+    /// The lasso is a SELECTION tool, not an ink tool — the Pencil doesn't
+    /// draw while it's active; finger/Pencil gestures select & edit instead.
+    var isSelectionTool: Bool { self == .lasso }
 
     var sizeRange: ClosedRange<CGFloat> {
         switch self {
@@ -70,6 +76,7 @@ enum DrawingToolType: String, CaseIterable, Hashable {
         case .watercolor:  return 8...60
         case .highlighter: return 10...60
         case .shape:       return 1...24
+        case .lasso:       return 1...24
         case .eraser:      return 5...50
         }
     }
@@ -86,13 +93,14 @@ enum DrawingToolType: String, CaseIterable, Hashable {
         case .watercolor:  return 26
         case .highlighter: return 25
         case .shape:       return 4
+        case .lasso:       return 4
         case .eraser:      return 20
         }
     }
 
-    /// Tools that paint color (everything except the eraser) — used to decide
-    /// whether to show the color picker.
-    var isInk: Bool { self != .eraser }
+    /// Tools that paint color — used to decide whether to show the color
+    /// picker. The eraser and the lasso (a selection tool) paint nothing.
+    var isInk: Bool { self != .eraser && self != .lasso }
 
     // MARK: Strength (0–10)
     //
@@ -135,6 +143,7 @@ enum DrawingToolType: String, CaseIterable, Hashable {
         case .watercolor:  return "water-pen"
         case .highlighter: return "highlighter"
         case .shape:       return "shape"
+        case .lasso:       return "lasso"            // no art → SF fallback
         case .eraser:      return "eraser"
         }
     }
@@ -679,6 +688,11 @@ struct DrawingCanvasView: UIViewRepresentable {
     /// Default Pen (handwriting-tuned). Drives both the live tool mapping
     /// and the post-stroke refinement.
     var penPreset: CustomPen? = nil
+    /// Changes ONLY when the hosting view replaced `drawing` externally (page
+    /// switch / erase / load). The canvas is refreshed from the binding solely
+    /// when this differs from the last applied value — so an incidental
+    /// re-render can never overwrite strokes still inside the autosave debounce.
+    var loadToken: Int = 0
     var canvasController: CanvasController
     var onErasePage: () -> Void
     var onNextPage:  () -> Void = {}   // 3-finger swipe up (edit) / swipe left (read-only)
@@ -802,18 +816,27 @@ struct DrawingCanvasView: UIViewRepresentable {
 
         applyReadOnlyState(to: canvas, coordinator: coord)
         applyTool(to: canvas)
+        // The initial drawing is already on the canvas; record its token so the
+        // first incidental update doesn't re-apply (or wipe) it.
+        coord.appliedLoadToken = loadToken
         return canvas
     }
 
     func updateUIView(_ canvas: ManagedCanvasView, context: Context) {
-        // Only update drawing when it actually differs (e.g. page switch).
-        // Unconditional assignment would erase strokes drawn during the debounce window.
-        if canvas.drawing != drawing {
-            canvas.drawing = drawing
-            // External replacement (page switch/reload): everything now on
-            // the canvas is pre-existing ink — it must never be swept into
-            // custom-pen refinement.
-            context.coordinator.resetPenRefinementTracking(for: canvas)
+        // Push the binding onto the canvas ONLY on an external replacement
+        // (page switch / erase / load), detected by a change in `loadToken`.
+        // Comparing `canvas.drawing != drawing` here was the bug: an incidental
+        // SwiftUI re-render during the ~400 ms autosave debounce (when the
+        // binding still holds the OLD drawing while the canvas already has the
+        // newest stroke) would assign the stale value back and ERASE the stroke.
+        if context.coordinator.appliedLoadToken != loadToken {
+            context.coordinator.appliedLoadToken = loadToken
+            if canvas.drawing != drawing {
+                canvas.drawing = drawing
+                // External replacement: everything now on the canvas is
+                // pre-existing ink — it must never be swept into refinement.
+                context.coordinator.resetPenRefinementTracking(for: canvas)
+            }
         }
 
         canvas.isRulerActive        = isRulerActive
@@ -832,8 +855,10 @@ struct DrawingCanvasView: UIViewRepresentable {
     }
 
     /// Flips drawing + gesture availability between edit and read-only modes.
+    /// The lasso tool also disables ink (drawing) while keeping the editing
+    /// gestures (undo/redo/page-turn) live, so selection never lays down ink.
     private func applyReadOnlyState(to canvas: ManagedCanvasView, coordinator: Coordinator) {
-        canvas.drawingGestureRecognizer.isEnabled = !isReadOnly
+        canvas.drawingGestureRecognizer.isEnabled = !isReadOnly && !toolType.isSelectionTool
         coordinator.editingGestures.forEach { $0.isEnabled = !isReadOnly }
         coordinator.readingGestures.forEach { $0.isEnabled = isReadOnly }
     }
@@ -886,6 +911,11 @@ struct DrawingCanvasView: UIViewRepresentable {
             } else {
                 canvas.tool = PKInkingTool(.pen, color: color, width: lineWidth)
             }
+        case .lasso:
+            // Selection mode — no ink is laid down. The drawing gesture is
+            // disabled in `applyReadOnlyState`; the SwiftUI selection overlay
+            // handles all touches. Keep a harmless tool assigned.
+            canvas.tool = PKInkingTool(.pen, color: color, width: lineWidth)
         case .eraser:
             switch eraserMode {
             case .stroke:
@@ -909,6 +939,9 @@ struct DrawingCanvasView: UIViewRepresentable {
         var editingGestures: [UIGestureRecognizer] = []
         /// Read-only page-turn swipes — enabled ONLY in read-only mode.
         var readingGestures: [UIGestureRecognizer] = []
+        /// Last `loadToken` applied to the canvas — guards against re-applying
+        /// (and wiping) the drawing on incidental re-renders.
+        var appliedLoadToken: Int = -1
         private var debounceTask: Task<Void, Never>?
         private var shapeRecognitionTask: Task<Void, Never>?
         private var shapeStartStrokeCount: Int?

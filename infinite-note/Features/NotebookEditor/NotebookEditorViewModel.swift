@@ -14,6 +14,12 @@ final class NotebookEditorViewModel {
     var isRulerActive = false
     var pageBackgroundImage: UIImage? = nil
 
+    /// Bumped ONLY when `drawing` is replaced externally (page switch, erase,
+    /// load). `DrawingCanvasView` pushes the binding onto the live canvas only
+    /// when this changes — so incidental SwiftUI re-renders can never overwrite
+    /// (and wipe) strokes still inside the autosave debounce window.
+    var drawingLoadToken = 0
+
     /// Thumbnail images keyed by page ID, rendered lazily per page.
     var pageThumbnails: [String: UIImage] = [:]
     /// Increment to force a specific page's thumbnail to re-render.
@@ -21,9 +27,25 @@ final class NotebookEditorViewModel {
 
     let canvasController = CanvasController()
 
+    /// Placed-object + lasso editing for the CURRENT page. Reconfigured on
+    /// every page switch; bridges to the live canvas drawing via closures so
+    /// the lasso can lift/merge ink without owning the canvas.
+    let editController = PageEditController()
+
+    /// Mirrors the app theme so the controller seeds new text in a visible
+    /// colour and renders ink snapshots under the right trait. Set by the view.
+    var isDarkTheme = false {
+        didSet { editController.isDark = isDarkTheme }
+    }
+
+    /// Called after a notebook-level change (cover / default style) so the
+    /// home screen can reload and reflect it.
+    var onNotebookChanged: () -> Void = {}
+
     private let drawingService = DrawingService.shared
     private let notebookService = NotebookService.shared
     private let storage = FileStorageManager.shared
+    private let pageObjectService = PageObjectService.shared
     private var saveTask: Task<Void, Never>?
     /// True after a stroke-save failure has been surfaced; reset by the next
     /// successful save. Keeps the ~500 ms autosave from spamming one alert
@@ -41,6 +63,39 @@ final class NotebookEditorViewModel {
 
     init(notebook: Notebook) {
         self.notebook = notebook
+        // Bridge the edit controller to the live canvas drawing.
+        editController.getDrawing = { [weak self] in
+            self?.canvasController.canvasView?.drawing ?? self?.drawing ?? PKDrawing()
+        }
+        editController.setDrawing = { [weak self] newDrawing in
+            guard let self else { return }
+            self.drawing = newDrawing
+            // Apply synchronously so a lasso lift/merge shows immediately;
+            // safe here because drawing is disabled in lasso mode (no
+            // in-flight stroke to cancel).
+            self.canvasController.canvasView?.drawing = newDrawing
+            self.saveCurrentDrawingDebounced()
+        }
+        editController.onError = { [weak self] message in
+            self?.errorMessage = message
+        }
+        // Object + lasso edits register on the canvas's UndoManager — the same
+        // one PencilKit uses — so the existing undo/redo buttons cover them.
+        editController.undoManagerProvider = { [weak self] in
+            self?.canvasController.canvasView?.undoManager
+        }
+    }
+
+    /// Reconfigures the edit controller for whatever page is now current.
+    private func configureEditController() {
+        guard let page = currentPage else { return }
+        editController.configure(notebookId: notebook.id, pageId: page.id, isDark: isDarkTheme)
+    }
+
+    /// Commits any in-flight lasso/text selection so nothing is lost on a page
+    /// switch, close, export or sync.
+    func commitPendingEdits() {
+        editController.clearSelection()
     }
 
     // MARK: - Load
@@ -54,6 +109,7 @@ final class NotebookEditorViewModel {
             }
             try loadCurrentDrawing()
             loadPageBackground()
+            configureEditController()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -63,11 +119,13 @@ final class NotebookEditorViewModel {
 
     func goToPage(at index: Int) {
         guard index >= 0, index < pages.count else { return }
+        commitPendingEdits()
         saveCurrentDrawing()
         currentPageIndex = index
         do { try loadCurrentDrawing() }
         catch { errorMessage = error.localizedDescription }
         loadPageBackground()
+        configureEditController()
     }
 
     func goToNextPage() { goToPage(at: currentPageIndex + 1) }
@@ -76,13 +134,16 @@ final class NotebookEditorViewModel {
     // MARK: - Page Management
 
     func addPage() {
+        commitPendingEdits()
         saveCurrentDrawing()
         do {
             let page = try drawingService.addPage(to: notebook.id, style: notebook.defaultPageStyle)
             pages.append(page)
             currentPageIndex = pages.count - 1
             drawing = PKDrawing()
+            drawingLoadToken += 1
             pageBackgroundImage = nil
+            configureEditController()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -96,8 +157,16 @@ final class NotebookEditorViewModel {
         // the page list — `loadCurrentDrawing()` below re-reads it from disk,
         // which would otherwise clobber strokes still in the debounce window
         // when a *different* page is deleted from the sidebar.
+        commitPendingEdits()
         saveCurrentDrawing()
         let page = pages[index]
+        // The page-objects rows cascade-delete with the page, but their photo
+        // files on disk don't — remove them so a deleted page leaves nothing.
+        if let objects = try? pageObjectService.objects(for: page.id) {
+            for object in objects where object.imageFile != nil {
+                storage.deletePageObjectImage(notebookId: notebook.id, fileName: object.imageFile!)
+            }
+        }
         do {
             try drawingService.deletePage(page)
             pages.remove(at: index)
@@ -108,6 +177,7 @@ final class NotebookEditorViewModel {
             if currentPageIndex >= pages.count { currentPageIndex = pages.count - 1 }
             try loadCurrentDrawing()
             loadPageBackground()
+            configureEditController()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -168,6 +238,7 @@ final class NotebookEditorViewModel {
 
     func eraseCurrentPage() {
         drawing = PKDrawing()
+        drawingLoadToken += 1
         canvasController.clearPage()
         saveCurrentDrawing()
     }
@@ -216,6 +287,31 @@ final class NotebookEditorViewModel {
         }
     }
 
+    // MARK: - Notebook-Level Settings
+
+    /// Changes the default style for FUTURE pages. Existing pages are untouched.
+    func setDefaultPageStyle(_ style: PageStyle) {
+        do {
+            try notebookService.updateDefaultPageStyle(style, for: notebook)
+            notebook.defaultPageStyle = style
+            onNotebookChanged()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Replaces the notebook's cover photo.
+    func updateCoverImage(_ data: Data) {
+        do {
+            try notebookService.updateCoverImage(data, for: notebook)
+            notebook.coverImagePath = "cover.jpg"
+            notebook.updatedAt = .now
+            onNotebookChanged()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     // MARK: - Thumbnail Access
 
     /// Returns the cached thumbnail for `page`, or nil if not yet rendered.
@@ -241,6 +337,7 @@ final class NotebookEditorViewModel {
     }
 
     private func loadCurrentDrawing() throws {
+        defer { drawingLoadToken += 1 }   // external replacement → push to canvas
         guard let page = currentPage else { drawing = PKDrawing(); return }
         drawing = try drawingService.loadDrawing(for: page)
     }

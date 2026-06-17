@@ -74,6 +74,10 @@ final class PDFGenerator {
                     // Scale 1: the canvas and PDF share the same coordinate space.
                     drawBackground(for: page, in: ctx, pageSize: pageSize, scale: 1)
 
+                    // Placed objects (photos + rich text) render UNDER the ink,
+                    // 1:1 in paper coordinates — same as on screen.
+                    PageObjectRenderer.draw(pageId: page.id, notebookId: page.notebookId)
+
                     // Strokes live in paper coordinates, so they normally render 1:1.
                     // Legacy strokes (drawn before the fixed paper existed) may extend
                     // past the page — render from the union of paper and stroke bounds

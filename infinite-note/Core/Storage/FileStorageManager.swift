@@ -73,6 +73,33 @@ final class FileStorageManager {
         try? FileManager.default.removeItem(at: url)
     }
 
+    // MARK: - Page Object Images (placed photos)
+
+    /// Persists a placed-photo's bytes under the notebook folder, keyed by the
+    /// object's stored `image_file` name. Throws so a disk-full failure
+    /// surfaces instead of silently losing the photo.
+    func savePageObjectImage(_ data: Data, notebookId: String, fileName: String) throws {
+        try ensureNotebookDirectory(notebookId: notebookId)
+        let url = pageObjectImageURL(notebookId: notebookId, fileName: fileName)
+        try data.write(to: url)
+    }
+
+    func loadPageObjectImage(notebookId: String, fileName: String) -> UIImage? {
+        let url = pageObjectImageURL(notebookId: notebookId, fileName: fileName)
+        guard FileManager.default.fileExists(atPath: url.path),
+              let data = try? Data(contentsOf: url) else { return nil }
+        return UIImage(data: data)
+    }
+
+    func pageObjectImageURL(notebookId: String, fileName: String) -> URL {
+        notebookDirectory(notebookId: notebookId).appendingPathComponent(fileName)
+    }
+
+    func deletePageObjectImage(notebookId: String, fileName: String) {
+        let url = pageObjectImageURL(notebookId: notebookId, fileName: fileName)
+        try? FileManager.default.removeItem(at: url)
+    }
+
     // MARK: - Folder Image
 
     private var foldersRootURL: URL {

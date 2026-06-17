@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import UIKit
 
 final class DatabaseManager: @unchecked Sendable {
     static let shared = DatabaseManager()
@@ -13,27 +14,121 @@ final class DatabaseManager: @unchecked Sendable {
     /// corruption error into a permanent crash loop at launch.)
     private(set) var initializationError: Error?
 
+    /// Posted when the on-disk database is recovered after having fallen back
+    /// to the temporary in-memory store — the UI reloads its content on this.
+    static let didReopenNotification = Notification.Name("DatabaseManager.didReopen")
+
+    private let dbURL: URL
+
     private init() {
-        let dbURL = FileManager.default
+        dbURL = FileManager.default
             .urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("infinite_note.db")
 
-        do {
-            let queue = try DatabaseQueue(path: dbURL.path)
-            try Self.runMigrations(on: queue)
+        // CRITICAL on real devices: make the database folder use a consistent
+        // "available after first unlock" protection BEFORE opening. Otherwise
+        // SQLite's journal/sidecar files can inherit a stricter class than the
+        // main file, and a normal relaunch then can't read the database — which
+        // looks exactly like "all my data vanished" even though it's safe on
+        // disk. Done before the open so new sidecar files inherit it too.
+        Self.makeAccessible(dbURL)
+
+        // Opening can also fail transiently right after a rebuild / OS-kill,
+        // before a stale lock clears — so retry a few times. The on-disk file
+        // is NEVER deleted or replaced here; the user's data is always safe.
+        var openError: Error?
+        if let queue = Self.openDiskQueue(at: dbURL, attempts: 5, lastError: &openError) {
             dbQueue = queue
-        } catch {
-            initializationError = error
-            // Keep the app usable without touching the (possibly corrupt)
-            // file on disk — a future launch or update may still recover it.
+            initializationError = nil
+        } else {
+            // Last resort: a temporary in-memory store so the app still runs.
             do {
                 let memoryQueue = try DatabaseQueue()
                 try Self.runMigrations(on: memoryQueue)
                 dbQueue = memoryQueue
+                // Keep the REAL underlying error so the UI can show what went
+                // wrong (locked / corrupt / I/O), which pinpoints the cause.
+                initializationError = openError ?? NSError(
+                    domain: "DatabaseManager", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "The notebook library is temporarily unavailable."])
             } catch {
-                // Migrations are deterministic; if even an in-memory database
-                // fails, something is catastrophically wrong with the runtime.
                 fatalError("In-memory database initialization failed: \(error)")
+            }
+            scheduleRecovery()
+        }
+
+        // If the open failed because protected data wasn't ready yet, retry the
+        // instant it becomes available (right after the device is unlocked).
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.protectedDataDidBecomeAvailableNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.reopenIfNeeded()
+        }
+    }
+
+    // MARK: - Disk open (with retries)
+
+    /// Attempts to open and migrate the on-disk database, retrying briefly so a
+    /// stale lock from a just-killed process can release. Returns nil on
+    /// persistent failure. Does NOT delete or replace the file.
+    private static func openDiskQueue(at url: URL, attempts: Int,
+                                      lastError: inout Error?) -> DatabaseQueue? {
+        // Reset protection first so a file left with a stricter class by an
+        // earlier build can be read on this (unlocked) launch.
+        makeAccessible(url)
+        for attempt in 0..<max(1, attempts) {
+            do {
+                let queue = try DatabaseQueue(path: url.path)
+                try runMigrations(on: queue)
+                makeAccessible(url)   // keep newly-created sidecar files readable
+                return queue
+            } catch {
+                lastError = error
+                if attempt < attempts - 1 { Thread.sleep(forTimeInterval: 0.3) }
+            }
+        }
+        if let lastError { NSLog("DatabaseManager open failed: \(lastError)") }
+        return nil
+    }
+
+    /// Sets "available after first unlock" protection on the database folder and
+    /// every database file, so all of them share one accessible class. (The
+    /// folder attribute makes future journal/wal/shm files inherit it.)
+    private static func makeAccessible(_ url: URL) {
+        let fm = FileManager.default
+        let attrs: [FileAttributeKey: Any] =
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
+        try? fm.setAttributes(attrs, ofItemAtPath: url.deletingLastPathComponent().path)
+        for path in [url.path, url.path + "-wal", url.path + "-shm", url.path + "-journal"]
+        where fm.fileExists(atPath: path) {
+            try? fm.setAttributes(attrs, ofItemAtPath: path)
+        }
+    }
+
+    // MARK: - Recovery
+
+    /// Re-attempts the on-disk database when currently on the in-memory
+    /// fallback. Safe to call repeatedly / on every foreground. Returns true if
+    /// recovered. No-op once the real database is open.
+    @discardableResult
+    func reopenIfNeeded() -> Bool {
+        guard initializationError != nil else { return false }
+        var error: Error?
+        guard let queue = Self.openDiskQueue(at: dbURL, attempts: 2, lastError: &error) else { return false }
+        dbQueue = queue
+        initializationError = nil
+        NotificationCenter.default.post(name: Self.didReopenNotification, object: nil)
+        return true
+    }
+
+    /// Retries recovery a few times on the main queue (each call opens ONCE —
+    /// no overlapping connections that could self-lock).
+    private func scheduleRecovery() {
+        for delay in [0.5, 1.5, 3.0, 6.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.reopenIfNeeded()
             }
         }
     }
@@ -151,6 +246,34 @@ final class DatabaseManager: @unchecked Sendable {
                 t.column("created_at", .datetime).notNull()
                 t.column("updated_at", .datetime).notNull()
             }
+        }
+
+        // v10 — placed page objects (rich-text boxes + photos). These live ON
+        // the page in the fixed paper coordinate space, NOT as a background.
+        // Photo bytes live on disk (image_file); text is stored inline as RTF.
+        migrator.registerMigration("v10_page_objects") { db in
+            try db.create(table: "page_objects", ifNotExists: true) { t in
+                t.column("id", .text).primaryKey()
+                t.column("page_id", .text).notNull()
+                    .references("pages", onDelete: .cascade)
+                t.column("kind", .text).notNull().defaults(to: "text")
+                t.column("x", .double).notNull().defaults(to: 0)
+                t.column("y", .double).notNull().defaults(to: 0)
+                t.column("width", .double).notNull().defaults(to: 200)
+                t.column("height", .double).notNull().defaults(to: 120)
+                t.column("rotation", .double).notNull().defaults(to: 0)
+                t.column("z_index", .integer).notNull().defaults(to: 0)
+                t.column("text_rtf", .blob)
+                t.column("image_file", .text)
+                t.column("created_at", .datetime).notNull()
+                t.column("updated_at", .datetime).notNull()
+            }
+            try db.create(
+                index: "idx_page_objects_page",
+                on: "page_objects",
+                columns: ["page_id"],
+                ifNotExists: true
+            )
         }
 
         try migrator.migrate(dbQueue)

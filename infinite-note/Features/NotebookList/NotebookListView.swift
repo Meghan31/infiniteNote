@@ -3,6 +3,7 @@ import PhotosUI
 
 struct NotebookListView: View {
     @EnvironmentObject private var themeManager: ThemeManager
+    @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel = NotebookListViewModel()
     @State private var selectedNotebook: Notebook?
     @State private var openNotebooks: [Notebook] = []
@@ -77,7 +78,8 @@ struct NotebookListView: View {
                         }
                     },
                     onToggleBooksSidebar: { toggleBooksSidebar() },
-                    onSynced: { date in viewModel.applySyncDate(date, to: notebook) }
+                    onSynced: { date in viewModel.applySyncDate(date, to: notebook) },
+                    onNotebookChanged: { viewModel.loadNotebooks() }
                 )
                 .id(notebook.id)
             } else {
@@ -86,6 +88,18 @@ struct NotebookListView: View {
         }
         .toolbar(removing: .sidebarToggle)
         .onAppear { viewModel.loadNotebooks() }
+        // The database recovered from its temporary in-memory fallback —
+        // reload so the library reappears without a force-quit.
+        .onReceive(NotificationCenter.default.publisher(for: DatabaseManager.didReopenNotification)) { _ in
+            viewModel.loadNotebooks()
+        }
+        // Every time the app returns to the foreground, make sure we're on the
+        // real on-disk database and re-read the library. Idempotent and cheap.
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            DatabaseManager.shared.reopenIfNeeded()
+            viewModel.loadNotebooks()
+        }
         // Create sheet — uses proper View struct so @State works
         .sheet(isPresented: $showCreateSheet) {
             NotebookCreationSheet { title, colorIndex, photoData, style, pageBackground, description, author in

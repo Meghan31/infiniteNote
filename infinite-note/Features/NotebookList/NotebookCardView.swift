@@ -135,8 +135,9 @@ struct NotebookCardView: View {
             Divider()
             Button(role: .destructive) { onDelete() } label: { Label("Delete", systemImage: "trash") }
         }
-        .task(id: notebook.id) {
-            // Load cover image off-main
+        // Keyed by updatedAt too, so replacing the cover photo (same filename)
+        // still reloads the image — not just the first time one is added.
+        .task(id: "\(notebook.id)-\(notebook.updatedAt.timeIntervalSince1970)") {
             coverImage = await Task.detached(priority: .userInitiated) {
                 FileStorageManager.shared.loadCoverImage(notebookId: notebook.id)
             }.value

@@ -93,10 +93,12 @@ final class DrawingService: @unchecked Sendable {
         isDark: Bool = false
     ) -> UIImage {
         let drawing = (try? loadDrawing(for: page)) ?? PKDrawing()
+        let hasObjects = ((try? PageObjectService.shared.objects(for: page.id))?.isEmpty == false)
 
-        // Empty page → just the themed page background. Skips the Metal
-        // stroke render entirely (PencilKit aborts on degenerate textures).
-        if drawing.strokes.isEmpty {
+        // Empty page (no ink AND no objects) → just the themed page background.
+        // Skips the Metal stroke render entirely (PencilKit aborts on
+        // degenerate textures).
+        if drawing.strokes.isEmpty && !hasObjects {
             let renderer = UIGraphicsImageRenderer(size: size)
             return renderer.image { ctx in
                 (isDark ? UIColor.black : UIColor.white).setFill()
@@ -120,12 +122,21 @@ final class DrawingService: @unchecked Sendable {
 
         // Render strokes under an explicit trait so ink inversion matches
         // the in-app page (black-on-white light, white-on-black dark).
-        var strokeImage = UIImage()
-        let render = {
-            strokeImage = drawing.image(from: CGRect(origin: .zero, size: source), scale: 1.0)
+        // Skip the Metal render entirely when there's no ink (objects-only page).
+        var strokeImage: UIImage?
+        if !drawing.strokes.isEmpty {
+            var img = UIImage()
+            let render = {
+                img = drawing.image(from: CGRect(origin: .zero, size: source), scale: 1.0)
+            }
+            UITraitCollection(userInterfaceStyle: isDark ? .dark : .light)
+                .performAsCurrent(render)
+            strokeImage = img
         }
-        UITraitCollection(userInterfaceStyle: isDark ? .dark : .light)
-            .performAsCurrent(render)
+
+        // Placed objects render beneath the ink, in the same source space.
+        let objectsImage = PageObjectRenderer.renderImage(
+            pageId: page.id, notebookId: page.notebookId, size: source)
 
         let renderer = UIGraphicsImageRenderer(size: size)
         return renderer.image { ctx in
@@ -138,7 +149,9 @@ final class DrawingService: @unchecked Sendable {
             let drawSize = CGSize(width: source.width * s, height: source.height * s)
             let origin = CGPoint(x: (size.width - drawSize.width) / 2,
                                  y: (size.height - drawSize.height) / 2)
-            strokeImage.draw(in: CGRect(origin: origin, size: drawSize))
+            let drawRect = CGRect(origin: origin, size: drawSize)
+            objectsImage?.draw(in: drawRect)
+            strokeImage?.draw(in: drawRect)
         }
     }
 }

@@ -35,6 +35,8 @@ struct infinite_noteApp: App {
     /// Portrait lock (see AppDelegate).
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
+    @Environment(\.scenePhase) private var scenePhase
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -43,6 +45,12 @@ struct infinite_noteApp: App {
                 // with our custom surfaces — no restart needed.
                 .preferredColorScheme(themeManager.colorScheme)
                 .tint(Color.burgundy)
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // If the database fell back to the in-memory store on launch,
+            // re-attempt the real one whenever the app becomes active — the
+            // user's content returns without a force-quit. (No-op otherwise.)
+            if phase == .active { DatabaseManager.shared.reopenIfNeeded() }
         }
     }
 }
