@@ -87,7 +87,13 @@ struct NotebookListView: View {
             }
         }
         .toolbar(removing: .sidebarToggle)
-        .onAppear { viewModel.loadNotebooks() }
+        .onAppear {
+            viewModel.loadNotebooks()
+            // Warm up PencilKit's ink renderer (handwritingd) while the user is
+            // still on the home screen, so saved pages render on first open
+            // instead of coming up blank on a cold launch.
+            InkRenderReadiness.shared.ensureWarmupStarted()
+        }
         // The database recovered from its temporary in-memory fallback —
         // reload so the library reappears without a force-quit.
         .onReceive(NotificationCenter.default.publisher(for: DatabaseManager.didReopenNotification)) { _ in

@@ -637,6 +637,27 @@ final class ManagedCanvasView: PKCanvasView {
     /// Our 3-finger double-tap recognizer (redo). Set before adding to window.
     weak var redoGesture: UIGestureRecognizer?
 
+    /// True while loaded ink still needs a forced render (the renderer wasn't
+    /// confirmed up yet). See the "Cold-launch render fix" section below.
+    private var loadedInkNeedsRender = false
+    /// Flips true after the live canvas is first confirmed to have rendered this
+    /// session. After that the renderer is warm, so page switches render
+    /// normally — no forced toggle (which could flash with no fallback masking
+    /// it) and no fallback image.
+    private var hasConfirmedLiveRenderOnce = false
+    /// Observer for `InkRenderReadiness.didBecomeReadyNotification` (removed on
+    /// deinit and when the canvas leaves its window).
+    private var renderReadyObserver: NSObjectProtocol?
+    /// Invoked once the live canvas has actually rendered the loaded ink, so the
+    /// host can fade out the daemon-independent fallback image shown underneath.
+    var onInkRendered: (() -> Void)?
+
+    deinit {
+        if let renderReadyObserver {
+            NotificationCenter.default.removeObserver(renderReadyObserver)
+        }
+    }
+
     override func addGestureRecognizer(_ gestureRecognizer: UIGestureRecognizer) {
         super.addGestureRecognizer(gestureRecognizer)
 
@@ -652,16 +673,163 @@ final class ManagedCanvasView: PKCanvasView {
         }
     }
 
-    // Block UITextInteraction at the point of addition.
-    // iOS adds UITextInteraction lazily (after the view enters the window), so
-    // removing it once in makeUIView is not enough — it gets re-added. By
-    // overriding addInteraction we silently drop every UITextInteraction the
-    // moment the system tries to attach it. This prevents the "Select All /
-    // Insert Space" menu that a 3-finger double-tap normally triggers through
-    // the text interaction layer, without affecting PencilKit or our gestures.
+    // PencilKit installs the system edit menu lazily. Depending on the iOS
+    // version it can use UITextInteraction or UIEditMenuInteraction, and it can
+    // attach that interaction to one of PKCanvasView's private subviews rather
+    // than to the canvas itself. Block direct additions and scrub the complete
+    // hierarchy before a touch is dispatched so "Select All / Insert Space"
+    // never appears. Drawing and our own gesture recognizers are unaffected.
     override func addInteraction(_ interaction: UIInteraction) {
-        if interaction is UITextInteraction { return }
+        if interaction is UITextInteraction || interaction is UIEditMenuInteraction { return }
         super.addInteraction(interaction)
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        removeSystemEditMenuInteractions()
+        if window == nil {
+            stopObservingRenderReadiness()
+        } else if loadedInkNeedsRender {
+            // Attached while the loaded ink hasn't rendered yet.
+            renderLoadedInkWhenReady()
+        }
+    }
+
+    // MARK: - Cold-launch render fix
+    //
+    // SYMPTOM: on a cold launch saved pages open BLANK even though the strokes
+    // loaded fine, until the app is killed/reopened several times.
+    //
+    // CAUSE: PencilKit rasterizes ink through `handwritingd`, a SYSTEM daemon
+    // that connects asynchronously and can be wedged OS-wide for a while
+    // ("Remote connection to handwritingd was invalidated"). Until it's up,
+    // neither the live canvas nor offscreen `PKDrawing.image()` draws anything —
+    // so there is no PencilKit-based fallback.
+    //
+    // FIX (two parts):
+    //   • The page shows a daemon-INDEPENDENT image of the strokes (drawn with
+    //     Core Graphics — see `StrokeImageRenderer`) UNDERNEATH this transparent
+    //     canvas, so the ink is visible immediately even while handwritingd is
+    //     down. That layer lives in the SwiftUI page; this canvas only drives the
+    //     hand-off back to live ink.
+    //   • Here, the instant `InkRenderReadiness` reports the daemon can
+    //     rasterize, we FORCE the live canvas to draw (toggle through an empty
+    //     drawing — any flash is hidden by the image underneath), then tell the
+    //     host (`onInkRendered`) it can fade the image out. The write detaches
+    //     the delegate so it can't autosave / refine / undo / refresh thumbnails,
+    //     reads the LIVE drawing so nothing is lost, and bails mid-stroke.
+
+    /// Called by the representable right after it assigns an externally-loaded
+    /// drawing (initial open / page switch). `rendererReady` is whether PencilKit
+    /// could rasterize ink at that moment.
+    func inkDidLoad(rendererReady: Bool) {
+        guard !drawing.strokes.isEmpty else { loadedInkNeedsRender = false; return }
+        // Once the live renderer has been confirmed working this session, page
+        // switches render normally — no fallback, no forced re-submit (which
+        // could flash with nothing masking it).
+        guard !hasConfirmedLiveRenderOnce else { loadedInkNeedsRender = false; return }
+        loadedInkNeedsRender = true
+        InkRenderReadiness.shared.ensureWarmupStarted()
+        if window != nil { renderLoadedInkWhenReady() }
+        // If off-window, didMoveToWindow drives this once we're attached.
+    }
+
+    private func startObservingRenderReadiness() {
+        guard renderReadyObserver == nil else { return }
+        renderReadyObserver = NotificationCenter.default.addObserver(
+            forName: InkRenderReadiness.didBecomeReadyNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.renderLoadedInkWhenReady()
+        }
+    }
+
+    private func stopObservingRenderReadiness() {
+        if let renderReadyObserver {
+            NotificationCenter.default.removeObserver(renderReadyObserver)
+            self.renderReadyObserver = nil
+        }
+    }
+
+    /// Once the renderer is up, FORCES the live canvas to draw the loaded ink and
+    /// then tells the host it can fade the fallback image out. If the renderer
+    /// isn't up yet, warms it and waits for the readiness notification. The force
+    /// happens only in this cold-launch window (while the fallback masks any
+    /// flash); afterwards `hasConfirmedLiveRenderOnce` keeps page switches clean.
+    private func renderLoadedInkWhenReady() {
+        guard loadedInkNeedsRender, window != nil else { return }
+        guard InkRenderReadiness.shared.isReady else {
+            InkRenderReadiness.shared.ensureWarmupStarted()
+            startObservingRenderReadiness()
+            return
+        }
+        guard !isMidStroke else { return }
+        loadedInkNeedsRender = false
+        stopObservingRenderReadiness()
+        forceRenderToggle()
+        // Re-toggle once as insurance against a transient daemon hiccup, then
+        // confirm so the host fades the fallback out and warm page switches stop
+        // using it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self, self.window != nil, !self.isMidStroke else { return }
+            self.forceRenderToggle()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self else { return }
+            self.hasConfirmedLiveRenderOnce = true
+            self.onInkRendered?()
+        }
+    }
+
+    private var isMidStroke: Bool {
+        switch drawingGestureRecognizer.state {
+        case .began, .changed: return true
+        default: return false
+        }
+    }
+
+    /// Re-submits the strokes to the renderer by toggling through an empty
+    /// drawing (a same-value assign can be ignored). Any flash is hidden by the
+    /// fallback image shown underneath. Delegate detached → no side effects;
+    /// reads the live drawing → nothing is lost.
+    private func forceRenderToggle() {
+        let snapshot = drawing
+        guard !snapshot.strokes.isEmpty else { return }
+        let savedDelegate = delegate
+        delegate = nil
+        drawing = PKDrawing()
+        drawing = snapshot
+        delegate = savedDelegate
+    }
+
+    override func didAddSubview(_ subview: UIView) {
+        super.didAddSubview(subview)
+        removeSystemEditMenuInteractions(from: subview)
+    }
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        // PencilKit may add an interaction after the previous layout pass.
+        // Hit-testing is the last reliable point before its recognizer sees
+        // the touch, and runs only at the start of a touch sequence.
+        removeSystemEditMenuInteractions()
+        return super.hitTest(point, with: event)
+    }
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        let name = NSStringFromSelector(action).lowercased()
+        if action == #selector(selectAll(_:)) || name.contains("insertspace") {
+            return false
+        }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
+    private func removeSystemEditMenuInteractions(from root: UIView? = nil) {
+        let view = root ?? self
+        let blocked = view.interactions.filter {
+            $0 is UITextInteraction || $0 is UIEditMenuInteraction
+        }
+        blocked.forEach(view.removeInteraction)
+        view.subviews.forEach { removeSystemEditMenuInteractions(from: $0) }
     }
 }
 
@@ -697,6 +865,15 @@ struct DrawingCanvasView: UIViewRepresentable {
     var onErasePage: () -> Void
     var onNextPage:  () -> Void = {}   // 3-finger swipe up (edit) / swipe left (read-only)
     var onPrevPage:  () -> Void = {}   // 3-finger swipe down (edit) / swipe right (read-only)
+    /// Pinch-to-zoom: incremental scale factor (>1 = zoom in). Works in all modes.
+    var onZoom: (CGFloat) -> Void = { _ in }
+    /// Two-finger pan (screen-space translation delta) while zoomed.
+    var onPan: (CGSize) -> Void = { _ in }
+    /// Pinch/pan ended — settle the zoom (snap back to 1× if barely zoomed).
+    var onZoomSettle: () -> Void = {}
+    /// Fired once the live canvas has rendered its loaded ink, so the host can
+    /// fade out the daemon-independent fallback image (cold-launch blank fix).
+    var onLiveInkRendered: () -> Void = {}
 
     func makeUIView(context: Context) -> ManagedCanvasView {
         let canvas = ManagedCanvasView()
@@ -800,6 +977,22 @@ struct DrawingCanvasView: UIViewRepresentable {
         readPrev.isEnabled               = false
         canvas.addGestureRecognizer(readPrev)
 
+        // ── Pinch to zoom (2 fingers) — active in EVERY mode ────────────
+        let pinch = UIPinchGestureRecognizer(
+            target: coord, action: #selector(Coordinator.handlePinch(_:)))
+        pinch.cancelsTouchesInView = false
+        pinch.delegate = coord
+        canvas.addGestureRecognizer(pinch)
+
+        // ── Two-finger pan (move the zoomed page) — active in every mode ─
+        let zoomPan = UIPanGestureRecognizer(
+            target: coord, action: #selector(Coordinator.handleZoomPan(_:)))
+        zoomPan.minimumNumberOfTouches = 2
+        zoomPan.maximumNumberOfTouches = 2
+        zoomPan.cancelsTouchesInView = false
+        zoomPan.delegate = coord
+        canvas.addGestureRecognizer(zoomPan)
+
         // Patch any PencilKit single-tap GRs that were already on the canvas.
         for gr in preExisting {
             guard let tap = gr as? UITapGestureRecognizer,
@@ -808,7 +1001,7 @@ struct DrawingCanvasView: UIViewRepresentable {
             if tap.numberOfTouchesRequired == 3 { tap.require(toFail: redo) }
         }
 
-        coord.ourGestureRecognizers = [undo, redo, erase, prevPage, nextPage, readNext, readPrev]
+        coord.ourGestureRecognizers = [undo, redo, erase, prevPage, nextPage, readNext, readPrev, pinch, zoomPan]
         coord.editingGestures = [undo, redo, erase, prevPage, nextPage]
         coord.readingGestures = [readNext, readPrev]
         canvasController.canvasView = canvas
@@ -819,6 +1012,13 @@ struct DrawingCanvasView: UIViewRepresentable {
         // The initial drawing is already on the canvas; record its token so the
         // first incidental update doesn't re-apply (or wipe) it.
         coord.appliedLoadToken = loadToken
+        // Cold-launch blank-strokes fix: warm the ink renderer, hand off from the
+        // fallback image once the live canvas renders, and note whether the
+        // renderer was ready when this initial ink was applied (if not, the
+        // canvas forces a render the instant the renderer comes up).
+        canvas.onInkRendered = { [weak coord] in coord?.parent.onLiveInkRendered() }
+        InkRenderReadiness.shared.ensureWarmupStarted()
+        canvas.inkDidLoad(rendererReady: InkRenderReadiness.shared.isReady)
         return canvas
     }
 
@@ -837,6 +1037,9 @@ struct DrawingCanvasView: UIViewRepresentable {
                 // pre-existing ink — it must never be swept into refinement.
                 context.coordinator.resetPenRefinementTracking(for: canvas)
             }
+            // A page switch / load replaced the ink — make sure it actually
+            // renders even if PencilKit's renderer isn't ready yet (cold launch).
+            canvas.inkDidLoad(rendererReady: InkRenderReadiness.shared.isReady)
         }
 
         canvas.isRulerActive        = isRulerActive
@@ -1162,5 +1365,33 @@ struct DrawingCanvasView: UIViewRepresentable {
         @objc func handleSwipeDown()  { parent.onPrevPage() }  // 3-finger down → previous
         @objc func handleSwipeLeft()  { parent.onNextPage() }  // read-only: right→left → next
         @objc func handleSwipeRight() { parent.onPrevPage() }  // read-only: left→right → previous
+
+        // MARK: Zoom / pan
+
+        @objc func handlePinch(_ g: UIPinchGestureRecognizer) {
+            switch g.state {
+            case .changed:
+                parent.onZoom(g.scale)   // incremental factor
+                g.scale = 1
+            case .ended, .cancelled, .failed:
+                parent.onZoomSettle()
+            default:
+                break
+            }
+        }
+
+        @objc func handleZoomPan(_ g: UIPanGestureRecognizer) {
+            switch g.state {
+            case .changed:
+                // Window (screen) space, matching the SwiftUI `.offset` we drive.
+                let t = g.translation(in: g.view?.window)
+                parent.onPan(CGSize(width: t.x, height: t.y))
+                g.setTranslation(.zero, in: g.view?.window)
+            case .ended, .cancelled, .failed:
+                parent.onZoomSettle()
+            default:
+                break
+            }
+        }
     }
 }

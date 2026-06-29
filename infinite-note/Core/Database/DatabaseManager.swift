@@ -20,6 +20,20 @@ final class DatabaseManager: @unchecked Sendable {
 
     private let dbURL: URL
 
+    /// Shared open configuration. The `busyMode` timeout is the important bit:
+    /// right after a rebuild or an OS-kill, the just-terminated process can
+    /// leave a stale lock on the database for a fraction of a second. Without a
+    /// timeout, SQLite returns SQLITE_BUSY *immediately*, the open throws, and we
+    /// drop to the temporary in-memory store — which is exactly the "my data is
+    /// gone until I force-quit and reopen" symptom. With a timeout, the open
+    /// simply WAITS for the stale lock to clear (it always does, in well under a
+    /// second) and succeeds on the first try, so the fallback never triggers.
+    private static func makeConfiguration() -> Configuration {
+        var config = Configuration()
+        config.busyMode = .timeout(5)
+        return config
+    }
+
     private init() {
         dbURL = FileManager.default
             .urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -80,7 +94,7 @@ final class DatabaseManager: @unchecked Sendable {
         makeAccessible(url)
         for attempt in 0..<max(1, attempts) {
             do {
-                let queue = try DatabaseQueue(path: url.path)
+                let queue = try DatabaseQueue(path: url.path, configuration: makeConfiguration())
                 try runMigrations(on: queue)
                 makeAccessible(url)   // keep newly-created sidecar files readable
                 return queue

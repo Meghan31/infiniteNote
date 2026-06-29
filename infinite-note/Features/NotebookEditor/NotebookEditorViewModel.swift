@@ -14,6 +14,19 @@ final class NotebookEditorViewModel {
     var isRulerActive = false
     var pageBackgroundImage: UIImage? = nil
 
+    /// Daemon-independent fallback render of the current page's ink (drawn with
+    /// Core Graphics, not PencilKit) shown UNDER the live canvas so saved
+    /// strokes are visible on a cold launch even while `handwritingd` can't
+    /// rasterize. Display-only — never persisted, never edited.
+    var inkFallbackImage: UIImage? = nil
+    /// Whether the fallback image should currently be shown. Set when a page
+    /// loads with ink; cleared once the live canvas confirms it has rendered.
+    var showInkFallback = false
+    /// Flips true the first time the live canvas confirms a render this session.
+    /// After that the renderer is warm, so page turns skip the fallback (the
+    /// live canvas draws straight away) and never flash the approximation.
+    private var liveRenderConfirmed = false
+
     /// Bumped ONLY when `drawing` is replaced externally (page switch, erase,
     /// load). `DrawingCanvasView` pushes the binding onto the live canvas only
     /// when this changes — so incidental SwiftUI re-renders can never overwrite
@@ -143,6 +156,7 @@ final class NotebookEditorViewModel {
             drawing = PKDrawing()
             drawingLoadToken += 1
             pageBackgroundImage = nil
+            refreshInkFallback()
             configureEditController()
         } catch {
             errorMessage = error.localizedDescription
@@ -239,6 +253,7 @@ final class NotebookEditorViewModel {
     func eraseCurrentPage() {
         drawing = PKDrawing()
         drawingLoadToken += 1
+        refreshInkFallback()
         canvasController.clearPage()
         saveCurrentDrawing()
     }
@@ -337,9 +352,30 @@ final class NotebookEditorViewModel {
     }
 
     private func loadCurrentDrawing() throws {
-        defer { drawingLoadToken += 1 }   // external replacement → push to canvas
+        defer { drawingLoadToken += 1; refreshInkFallback() }   // push to canvas + refresh fallback
         guard let page = currentPage else { drawing = PKDrawing(); return }
         drawing = try drawingService.loadDrawing(for: page)
+    }
+
+    /// Re-renders the daemon-independent ink fallback for the current page. It's
+    /// shown only until the live canvas confirms a render this session (after
+    /// which the renderer is warm and page turns draw live straight away).
+    private func refreshInkFallback() {
+        guard !liveRenderConfirmed, !drawing.strokes.isEmpty else {
+            inkFallbackImage = nil
+            showInkFallback = false
+            return
+        }
+        inkFallbackImage = StrokeImageRenderer.image(
+            for: drawing, size: PaperSpec.size, darkTheme: isDarkTheme)
+        showInkFallback = (inkFallbackImage != nil)
+    }
+
+    /// Called by the canvas once the LIVE PencilKit canvas has actually rendered
+    /// its ink — hands off from the fallback image to the real canvas.
+    func liveInkDidRender() {
+        liveRenderConfirmed = true
+        showInkFallback = false
     }
 
     private func loadPageBackground() {

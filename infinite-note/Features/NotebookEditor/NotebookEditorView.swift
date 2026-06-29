@@ -70,6 +70,15 @@ struct NotebookEditorView: View {
     // Change the notebook's cover photo (from the page-style popover).
     @State private var coverPhotoItem: PhotosPickerItem?
 
+    // Pinch-to-zoom (works in every mode).
+    @State private var pageZoom: CGFloat = 1
+    @State private var panOffset: CGSize = .zero
+
+    // Page-change "settle" animation.
+    @State private var pageTransOffset: CGFloat = 0
+    @State private var pageTransOpacity: Double = 1
+    @State private var pageTransScale: CGFloat = 1
+
     // Home alert
     @State private var showHomeAlert = false
 
@@ -373,6 +382,32 @@ struct NotebookEditorView: View {
         }
 
         immersiveOverlays
+
+        if pageZoom > 1.01 {
+            zoomResetBadge
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                .padding(18)
+                .transition(.scale(scale: 0.6).combined(with: .opacity))
+        }
+    }
+
+    /// Tap to snap back to 100% — shown only while zoomed in.
+    private var zoomResetBadge: some View {
+        Button { resetZoom() } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.down.right.and.arrow.up.left")
+                    .font(.system(size: 12, weight: .bold))
+                Text("\(Int((pageZoom * 100).rounded()))%")
+                    .font(.cartoon(13, weight: .heavy))
+            }
+            .foregroundStyle(themeManager.outline)
+            .padding(.horizontal, 13).padding(.vertical, 8)
+            .background(Capsule().fill(themeManager.selectionColor))
+            .overlay(Capsule().strokeBorder(themeManager.outline.opacity(0.5), lineWidth: 1.5))
+            .background(Capsule().fill(themeManager.hardShadow.opacity(0.25)).offset(x: 2, y: 2.5))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Reset zoom to 100%")
     }
 
     /// Write-only / read-only floating controls.
@@ -730,7 +765,7 @@ struct NotebookEditorView: View {
         HStack(spacing: 10) {
             Image(systemName: icon).font(.system(size: 15, weight: .semibold)).foregroundStyle(tint)
             Text(title).font(.cartoon(13, weight: .semibold)).foregroundStyle(tint)
-            Spacer()
+                .frame(maxWidth: .infinity, alignment: .leading)
             if checked { Image(systemName: "checkmark.circle.fill").foregroundStyle(tint) }
         }
         .padding(12)
@@ -829,43 +864,148 @@ struct NotebookEditorView: View {
         GeometryReader { geo in
             let fit = max(0.01, min(geo.size.width / PaperSpec.size.width,
                                     geo.size.height / PaperSpec.size.height))
-            ZStack {
-                canvasBackground
-                // Placed objects (photos + text) live BELOW the ink so the
-                // Pencil writes straight onto them.
-                PageObjectsContentView(controller: viewModel.editController)
-                DrawingCanvasView(
-                    drawing: Binding(get: { viewModel.drawing }, set: { viewModel.onDrawingChanged($0) }),
-                    isRulerActive: viewModel.isRulerActive,
-                    toolType: selectedTool,
-                    color: UIColor(selectedColor),
-                    lineWidth: currentSize,
-                    isDarkTheme: themeManager.isDark,
-                    isReadOnly: isReadOnly,
-                    eraserMode: eraserMode,
-                    penPreset: activePen,
-                    loadToken: viewModel.drawingLoadToken,
-                    canvasController: viewModel.canvasController,
-                    onErasePage: { showErasePageConfirm = true },
-                    onNextPage: { handleSwipeUpNext() },     // 3-finger up / read-only swipe left
-                    onPrevPage: { handleSwipeDownPrev() }    // 3-finger down / read-only swipe right
-                )
-                // Selection/lasso interaction sits ABOVE the ink and is active
-                // only while the Lasso tool is selected.
-                if selectedTool == .lasso && !isReadOnly {
-                    PageSelectionOverlay(
-                        controller: viewModel.editController,
-                        displayScale: fit,
-                        isDark: themeManager.isDark
-                    )
+            pageBody(fit: fit)
+                // Pinch zoom (1×–4×) about centre, plus two-finger pan when
+                // zoomed in. Applied to the WHOLE page so ink, objects and
+                // background scale together; drawing coordinates are unchanged.
+                .scaleEffect(fit * pageZoom, anchor: .center)
+                .shadow(color: .black.opacity(themeManager.isDark ? 0.45 : 0.14), radius: 14, y: 6)
+                .offset(pageZoom > 1 ? panOffset : .zero)
+                .frame(width: geo.size.width, height: geo.size.height)
+                // `clipped()` only clips pixels, not hit-testing. Without an
+                // explicit interaction shape the enlarged PKCanvasView keeps
+                // receiving taps outside this workspace and covers the tab,
+                // toolbar and navigation controls while zoomed.
+                .contentShape(.interaction, Rectangle())
+                .clipped()
+                // Page-change settle animation (driven by currentPageIndex).
+                .scaleEffect(pageTransScale)
+                .opacity(pageTransOpacity)
+                .offset(y: pageTransOffset)
+                .onChange(of: viewModel.currentPageIndex) { oldIndex, newIndex in
+                    resetZoom()
+                    animatePageChange(goingForward: newIndex >= oldIndex)
                 }
+        }
+    }
+
+    /// The page sheet itself (background + objects + ink + lasso overlay), at
+    /// the fixed paper size. Zoom / pan / animation are applied by the caller.
+    private func pageBody(fit: CGFloat) -> some View {
+        ZStack {
+            canvasBackground
+            // Placed objects (photos + text) live BELOW the ink so the
+            // Pencil writes straight onto them.
+            PageObjectsContentView(controller: viewModel.editController)
+            // Daemon-independent fallback render of the saved ink (Core
+            // Graphics, not PencilKit), shown UNDER the transparent live canvas
+            // so strokes are visible on a cold launch even while handwritingd
+            // can't rasterize. Faded out the moment the live canvas confirms a
+            // render. Non-interactive, display-only — never edited or saved.
+            if viewModel.showInkFallback, let fallback = viewModel.inkFallbackImage {
+                Image(uiImage: fallback)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: PaperSpec.size.width, height: PaperSpec.size.height)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
             }
-            .frame(width: PaperSpec.size.width, height: PaperSpec.size.height)
-            // Thin paper edge so the sheet reads against the desk background.
-            .overlay(Rectangle().strokeBorder(themeManager.outline.opacity(0.35), lineWidth: 2))
-            .scaleEffect(fit)
-            .shadow(color: .black.opacity(themeManager.isDark ? 0.45 : 0.14), radius: 14, y: 6)
-            .frame(width: geo.size.width, height: geo.size.height)
+            DrawingCanvasView(
+                drawing: Binding(get: { viewModel.drawing }, set: { viewModel.onDrawingChanged($0) }),
+                isRulerActive: viewModel.isRulerActive,
+                toolType: selectedTool,
+                color: UIColor(selectedColor),
+                lineWidth: currentSize,
+                isDarkTheme: themeManager.isDark,
+                isReadOnly: isReadOnly,
+                eraserMode: eraserMode,
+                penPreset: activePen,
+                loadToken: viewModel.drawingLoadToken,
+                canvasController: viewModel.canvasController,
+                onErasePage: { showErasePageConfirm = true },
+                onNextPage: { handleSwipeUpNext() },     // 3-finger up / read-only swipe left
+                onPrevPage: { handleSwipeDownPrev() },   // 3-finger down / read-only swipe right
+                onZoom: { factor in applyZoom(factor) },
+                onPan:  { delta in applyPan(delta, fit: fit) },
+                onZoomSettle: { settleZoom() },
+                onLiveInkRendered: {
+                    withAnimation(.easeOut(duration: 0.25)) { viewModel.liveInkDidRender() }
+                }
+            )
+            // Selection/lasso interaction sits ABOVE the ink and is active
+            // only while the Lasso tool is selected.
+            if selectedTool == .lasso && !isReadOnly {
+                PageSelectionOverlay(
+                    controller: viewModel.editController,
+                    displayScale: fit,
+                    isDark: themeManager.isDark
+                )
+            }
+        }
+        .frame(width: PaperSpec.size.width, height: PaperSpec.size.height)
+        // Thin paper edge so the sheet reads against the desk background.
+        .overlay(Rectangle().strokeBorder(themeManager.outline.opacity(0.35), lineWidth: 2))
+    }
+
+    // MARK: - Zoom helpers
+
+    private func applyZoom(_ factor: CGFloat) {
+        let newZoom = min(max(pageZoom * factor, 1), 4)
+        pageZoom = newZoom
+        if newZoom <= 1.001 { panOffset = .zero }
+    }
+
+    private func applyPan(_ delta: CGSize, fit: CGFloat) {
+        guard pageZoom > 1 else { return }
+        var next = panOffset
+        next.width += delta.width
+        next.height += delta.height
+        panOffset = clampedPan(next, fit: fit)
+    }
+
+    private func settleZoom() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            if pageZoom < 1.05 {
+                pageZoom = 1
+                panOffset = .zero
+            }
+        }
+    }
+
+    private func resetZoom() {
+        guard pageZoom != 1 || panOffset != .zero else { return }
+        withAnimation(.easeOut(duration: 0.2)) {
+            pageZoom = 1
+            panOffset = .zero
+        }
+    }
+
+    /// Keeps the zoomed page from being panned past its own edges.
+    private func clampedPan(_ offset: CGSize, fit: CGFloat) -> CGSize {
+        let scaledW = PaperSpec.size.width * fit * pageZoom
+        let scaledH = PaperSpec.size.height * fit * pageZoom
+        // The page is centred in an area that's at most its zoom==1 fitted size.
+        let areaW = PaperSpec.size.width * fit
+        let areaH = PaperSpec.size.height * fit
+        let maxX = max(0, (scaledW - areaW) / 2)
+        let maxY = max(0, (scaledH - areaH) / 2)
+        return CGSize(width: min(max(offset.width, -maxX), maxX),
+                      height: min(max(offset.height, -maxY), maxY))
+    }
+
+    // MARK: - Page-change animation
+
+    private func animatePageChange(goingForward: Bool) {
+        // Start the new page slightly offset / shrunk / faded, then spring it in.
+        pageTransOffset = goingForward ? 70 : -70
+        pageTransOpacity = 0
+        pageTransScale = 0.94
+        DispatchQueue.main.async {
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.8)) {
+                pageTransOffset = 0
+                pageTransOpacity = 1
+                pageTransScale = 1
+            }
         }
     }
 
