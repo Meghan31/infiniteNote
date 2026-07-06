@@ -42,32 +42,34 @@ enum StrokeImageRenderer {
         for point in stroke.path {
             points.append((point.location, max(0.5, point.size.width)))
         }
-        guard let first = points.first else { return }
+        guard let first = points.first, let last = points.last else { return }
 
         let color = displayColor(for: stroke.ink, darkTheme: darkTheme)
-        // Representative width: the median keeps a few huge/tiny samples from
-        // skewing the whole stroke.
-        let width = medianWidth(points.map(\.width))
+        // Translucent inks (highlighter, watercolour) must be drawn as ONE
+        // path with ONE width: per-segment drawing double-paints every joint,
+        // which visibly darkens a see-through ink into blotches.
+        let isTranslucent = color.cgColor.alpha < 0.99
 
         cg.saveGState()
         cg.concatenate(stroke.transform)
         cg.setStrokeColor(color.cgColor)
         cg.setFillColor(color.cgColor)
-        cg.setLineWidth(width)
 
         if points.count == 1 {
             // A single tap — draw a dot.
+            let width = first.width
             let r = width / 2
             cg.fillEllipse(in: CGRect(x: first.location.x - r, y: first.location.y - r,
                                       width: width, height: width))
-        } else {
+        } else if isTranslucent {
+            // Single smoothed path at the median width (keeps a few huge/tiny
+            // samples from skewing the whole stroke).
+            cg.setLineWidth(medianWidth(points.map(\.width)))
             let path = CGMutablePath()
             path.move(to: first.location)
             if points.count == 2 {
                 path.addLine(to: points[1].location)
             } else {
-                // Smooth through the control points with quadratic curves to the
-                // midpoints — turns a sparse polyline into a clean curve.
                 for i in 1..<(points.count - 1) {
                     let current = points[i].location
                     let next = points[i + 1].location
@@ -75,12 +77,57 @@ enum StrokeImageRenderer {
                                       y: (current.y + next.y) / 2)
                     path.addQuadCurve(to: mid, control: current)
                 }
-                path.addLine(to: points[points.count - 1].location)
+                path.addLine(to: last.location)
             }
             cg.addPath(path)
             cg.strokePath()
+        } else {
+            // OPAQUE ink: stroke each smoothed segment with its OWN width so
+            // pressure/tilt tapers survive — this is what keeps a fountain-pen
+            // stroke looking like a fountain pen instead of a flat ballpoint.
+            // Round caps make the width steps invisible on opaque colour.
+            for segment in smoothedSegments(points) {
+                cg.setLineWidth(segment.width)
+                cg.addPath(segment.path)
+                cg.strokePath()
+            }
         }
         cg.restoreGState()
+    }
+
+    /// Midpoint-smoothed quad-curve segments, each carrying the local width.
+    private static func smoothedSegments(
+        _ points: [(location: CGPoint, width: CGFloat)]
+    ) -> [(path: CGPath, width: CGFloat)] {
+        func mid(_ a: CGPoint, _ b: CGPoint) -> CGPoint {
+            CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
+        }
+        var segments: [(path: CGPath, width: CGFloat)] = []
+        let count = points.count
+        guard count >= 2 else { return segments }
+        if count == 2 {
+            let p = CGMutablePath()
+            p.move(to: points[0].location)
+            p.addLine(to: points[1].location)
+            segments.append((p, (points[0].width + points[1].width) / 2))
+            return segments
+        }
+        let lead = CGMutablePath()
+        lead.move(to: points[0].location)
+        lead.addLine(to: mid(points[0].location, points[1].location))
+        segments.append((lead, points[0].width))
+        for i in 1..<(count - 1) {
+            let p = CGMutablePath()
+            p.move(to: mid(points[i - 1].location, points[i].location))
+            p.addQuadCurve(to: mid(points[i].location, points[i + 1].location),
+                           control: points[i].location)
+            segments.append((p, points[i].width))
+        }
+        let tail = CGMutablePath()
+        tail.move(to: mid(points[count - 2].location, points[count - 1].location))
+        tail.addLine(to: points[count - 1].location)
+        segments.append((tail, points[count - 1].width))
+        return segments
     }
 
     /// Mirrors PencilKit's behaviour of showing dark ink as light on a dark page.

@@ -131,6 +131,14 @@ final class DrawingService: @unchecked Sendable {
             }
             UITraitCollection(userInterfaceStyle: isDark ? .dark : .light)
                 .performAsCurrent(render)
+            // While `handwritingd` is down, PencilKit renders NOTHING — the
+            // sidebar then shows rows of blank pages even though every page
+            // has ink. Detect the blank output and substitute the
+            // daemon-independent Core Graphics approximation; the real render
+            // replaces it on the next refresh once the daemon is back.
+            if Self.imageIsEffectivelyBlank(img) {
+                img = StrokeImageRenderer.image(for: drawing, size: source, darkTheme: isDark) ?? img
+            }
             strokeImage = img
         }
 
@@ -153,5 +161,30 @@ final class DrawingService: @unchecked Sendable {
             objectsImage?.draw(in: drawRect)
             strokeImage?.draw(in: drawRect)
         }
+    }
+
+    /// Cheap "did PencilKit actually draw anything?" check: scales the render
+    /// into a small buffer and scans alpha. All-transparent output is exactly
+    /// what a downed `handwritingd` produces. Errs toward "blank" — the only
+    /// consequence of a false positive is using the CG fallback, which still
+    /// shows the ink.
+    private static func imageIsEffectivelyBlank(_ image: UIImage) -> Bool {
+        guard let cg = image.cgImage else { return true }
+        let w = 96, h = 128
+        var pixels = [UInt8](repeating: 0, count: w * h * 4)
+        guard let ctx = CGContext(
+            data: &pixels, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: w * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return true }
+        ctx.interpolationQuality = .low
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        var i = 3
+        while i < pixels.count {
+            if pixels[i] > 4 { return false }
+            i += 4
+        }
+        return true
     }
 }

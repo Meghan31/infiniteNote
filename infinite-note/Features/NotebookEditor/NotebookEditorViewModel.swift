@@ -64,6 +64,12 @@ final class NotebookEditorViewModel {
     /// successful save. Keeps the ~500 ms autosave from spamming one alert
     /// per stroke while the disk stays full.
     private var hasWarnedSaveFailure = false
+    /// True while the CURRENT page's drawing could not be read from disk
+    /// (I/O error or corrupt file). While set, every save for this page is
+    /// BLOCKED: saving would overwrite the real ink on disk with whatever the
+    /// canvas happens to show (empty, or worse, the previous page's strokes).
+    /// Cleared by the next successful load of the page.
+    private var currentPageLoadFailed = false
 
     var currentPage: Page? {
         guard currentPageIndex < pages.count else { return nil }
@@ -119,6 +125,12 @@ final class NotebookEditorViewModel {
             if pages.isEmpty {
                 let page = try drawingService.addPage(to: notebook.id, style: notebook.defaultPageStyle)
                 pages = [page]
+            }
+            // `load()` can run again mid-session (database recovered from the
+            // in-memory fallback) — keep the cursor in bounds if the page
+            // list changed shape.
+            if currentPageIndex >= pages.count {
+                currentPageIndex = max(0, pages.count - 1)
             }
             try loadCurrentDrawing()
             loadPageBackground()
@@ -219,8 +231,23 @@ final class NotebookEditorViewModel {
         saveCurrentDrawingDebounced()
     }
 
-    func saveCurrentDrawing() {
+    /// Persists the current page's drawing.
+    ///
+    /// - Parameter allowEmptyOverwrite: pass `true` ONLY when an empty canvas
+    ///   is a deliberate user state (explicit page erase, ink erased or cut by
+    ///   hand, lasso edits). Lifecycle saves (page switch, close, background,
+    ///   sync, PDF export) leave it `false`, which arms a shield: an EMPTY
+    ///   drawing never overwrites a page whose file still holds real ink.
+    ///   Rationale: every data-loss incident here had the same shape — some
+    ///   failure (render daemon down, unread file, load error) left the canvas
+    ///   blank while the disk still had the user's strokes, and one incidental
+    ///   save then destroyed them permanently.
+    func saveCurrentDrawing(allowEmptyOverwrite: Bool = false) {
         guard let page = currentPage else { return }
+        // The page's ink never made it INTO memory — saving now would write
+        // over the user's real strokes with a blank (or stale) canvas. Skip;
+        // the flag clears on the next successful load of this page.
+        guard !currentPageLoadFailed else { return }
         // Pull the LIVE drawing straight from the canvas first. The bound
         // `drawing` copy can lag the canvas by up to ~400 ms (the
         // coordinator's debounce), which used to silently drop strokes drawn
@@ -230,6 +257,11 @@ final class NotebookEditorViewModel {
         // already gone — e.g. onDisappear — we fall back to the bound copy.)
         if let liveDrawing = canvasController.canvasView?.drawing {
             drawing = liveDrawing
+        }
+        // Blank-overwrite shield (see `allowEmptyOverwrite`).
+        if drawing.strokes.isEmpty, !allowEmptyOverwrite,
+           storage.savedDrawingHasProtectableInk(notebookId: notebook.id, pageId: page.id) {
+            return
         }
         do {
             try drawingService.saveDrawing(drawing, for: page)
@@ -255,7 +287,9 @@ final class NotebookEditorViewModel {
         drawingLoadToken += 1
         refreshInkFallback()
         canvasController.clearPage()
-        saveCurrentDrawing()
+        // Explicit user erase — the ONE lifecycle path where persisting an
+        // empty drawing over saved ink is exactly what was asked for.
+        saveCurrentDrawing(allowEmptyOverwrite: true)
     }
 
     func undo() { canvasController.undo() }
@@ -347,14 +381,64 @@ final class NotebookEditorViewModel {
         saveTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled else { return }
-            saveCurrentDrawing()
+            // This path only fires from real canvas edits (strokes, hand
+            // erasing, lasso cut/merge) — an empty canvas here is the user's
+            // deliberate doing, so it may persist.
+            saveCurrentDrawing(allowEmptyOverwrite: true)
         }
     }
 
     private func loadCurrentDrawing() throws {
         defer { drawingLoadToken += 1; refreshInkFallback() }   // push to canvas + refresh fallback
         guard let page = currentPage else { drawing = PKDrawing(); return }
-        drawing = try drawingService.loadDrawing(for: page)
+        do {
+            drawing = try drawingService.loadDrawing(for: page)
+            currentPageLoadFailed = false
+        } catch {
+            // NEVER leave the previous page's ink in `drawing` on a failed
+            // load — it would render onto (and eventually be saved into) this
+            // page. Show it blank, and block saves until a load succeeds so
+            // the on-disk file stays untouched.
+            drawing = PKDrawing()
+            currentPageLoadFailed = true
+            throw error
+        }
+    }
+
+    /// Called when the app returns to the foreground with this editor open.
+    /// iOS can tear the ink render daemon (`handwritingd`) down while the app
+    /// is suspended — so ink that rendered fine this morning can silently come
+    /// back BLANK now, with the fallback machinery already disarmed by the
+    /// earlier successful render. Re-verify with a real pixel probe and, if
+    /// the renderer is gone, re-show the CG fallback and re-arm the canvas's
+    /// forced-render hand-off. Cheap no-op while everything is healthy.
+    func reassertInkVisibilityIfNeeded() {
+        guard !drawing.strokes.isEmpty else { return }
+        // Probe ASYNCHRONOUSLY — never render on the main thread (with the
+        // daemon wedged that call can stall or kill the app). If the renderer
+        // is genuinely gone, bring the CG fallback back and re-arm the canvas.
+        InkRenderReadiness.shared.verifyReadiness { [weak self] ok in
+            guard let self, !ok, !self.drawing.strokes.isEmpty else { return }
+            self.liveRenderConfirmed = false
+            self.refreshInkFallback()
+            (self.canvasController.canvasView as? ManagedCanvasView)?.rearmInkRender()
+        }
+    }
+
+    /// Set while the CG fallback has been shown this session — the sidebar
+    /// thumbnails rendered in that window are approximations (or blank), so
+    /// one refresh pass is owed when the live renderer comes back.
+    private var thumbnailsNeedRecoveryRefresh = false
+
+    /// The ink renderer just came (back) up: re-render every thumbnail once so
+    /// approximated/blank sidebar pages upgrade to the real PencilKit render.
+    /// Safe to call repeatedly — only acts if a refresh is actually owed.
+    func rendererDidRecover() {
+        guard thumbnailsNeedRecoveryRefresh else { return }
+        thumbnailsNeedRecoveryRefresh = false
+        for page in pages {
+            thumbnailRefreshTriggers[page.id, default: 0] += 1
+        }
     }
 
     /// Re-renders the daemon-independent ink fallback for the current page. It's
@@ -369,6 +453,7 @@ final class NotebookEditorViewModel {
         inkFallbackImage = StrokeImageRenderer.image(
             for: drawing, size: PaperSpec.size, darkTheme: isDarkTheme)
         showInkFallback = (inkFallbackImage != nil)
+        if showInkFallback { thumbnailsNeedRecoveryRefresh = true }
     }
 
     /// Called by the canvas once the LIVE PencilKit canvas has actually rendered

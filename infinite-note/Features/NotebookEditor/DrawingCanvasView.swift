@@ -640,6 +640,12 @@ final class ManagedCanvasView: PKCanvasView {
     /// True while loaded ink still needs a forced render (the renderer wasn't
     /// confirmed up yet). See the "Cold-launch render fix" section below.
     private var loadedInkNeedsRender = false
+    /// Forced-render budget per loaded drawing. A flaky daemon could otherwise
+    /// bounce ready→not-ready and drive an endless toggle loop that thrashes
+    /// PencilKit (replacing `drawing` over and over) — after this many tries we
+    /// stop forcing and simply leave the CG fallback on screen.
+    private var forcedRenderAttempts = 0
+    private static let maxForcedRenderAttempts = 3
     /// Flips true after the live canvas is first confirmed to have rendered this
     /// session. After that the renderer is warm, so page switches render
     /// normally — no forced toggle (which could flash with no fallback masking
@@ -729,6 +735,7 @@ final class ManagedCanvasView: PKCanvasView {
         // could flash with nothing masking it).
         guard !hasConfirmedLiveRenderOnce else { loadedInkNeedsRender = false; return }
         loadedInkNeedsRender = true
+        forcedRenderAttempts = 0   // fresh budget for the newly loaded drawing
         InkRenderReadiness.shared.ensureWarmupStarted()
         if window != nil { renderLoadedInkWhenReady() }
         // If off-window, didMoveToWindow drives this once we're attached.
@@ -758,12 +765,24 @@ final class ManagedCanvasView: PKCanvasView {
     /// flash); afterwards `hasConfirmedLiveRenderOnce` keeps page switches clean.
     private func renderLoadedInkWhenReady() {
         guard loadedInkNeedsRender, window != nil else { return }
-        guard InkRenderReadiness.shared.isReady else {
-            InkRenderReadiness.shared.ensureWarmupStarted()
+        // Gate on the CACHED-but-FRESH flag only. This must stay dirt cheap:
+        // it runs inside SwiftUI updates (page switches land here from
+        // updateUIView). Probing PencilKit's renderer synchronously here froze
+        // and crashed the app when the daemon was wedged — probes belong on
+        // the readiness object's background queue, and we get woken by its
+        // notification. "Fresh" (re-confirmed within seconds) is what protects
+        // against the stale-latch blank-pages bug.
+        guard InkRenderReadiness.shared.isReadyAndFresh else {
             startObservingRenderReadiness()
+            InkRenderReadiness.shared.verifyReadiness()   // async; posts when up
             return
         }
         guard !isMidStroke else { return }
+        // Budget exhausted → stop forcing; the CG fallback stays visible and
+        // the user still sees their ink. Prevents an endless toggle loop when
+        // the daemon flaps up and down.
+        guard forcedRenderAttempts < Self.maxForcedRenderAttempts else { return }
+        forcedRenderAttempts += 1
         loadedInkNeedsRender = false
         stopObservingRenderReadiness()
         forceRenderToggle()
@@ -775,10 +794,37 @@ final class ManagedCanvasView: PKCanvasView {
             self.forceRenderToggle()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self else { return }
-            self.hasConfirmedLiveRenderOnce = true
-            self.onInkRendered?()
+            guard let self, self.window != nil else { return }
+            // Confirm with PIXELS, not hope — but asynchronously, off the main
+            // thread. If the daemon flaked between the toggle and now, keep
+            // the fallback visible and go back to waiting instead of declaring
+            // victory on a timer (the old timer-only confirm is what hid the
+            // fallback over a blank canvas).
+            InkRenderReadiness.shared.verifyReadiness { [weak self] ok in
+                guard let self, self.window != nil else { return }
+                guard ok else {
+                    self.loadedInkNeedsRender = true
+                    self.startObservingRenderReadiness()
+                    return
+                }
+                self.forcedRenderAttempts = 0
+                self.hasConfirmedLiveRenderOnce = true
+                self.onInkRendered?()
+            }
         }
+    }
+
+    /// Re-arms the cold-launch render machinery. Called when the app returns to
+    /// the foreground: the previous "confirmed" state may be stale because iOS
+    /// can tear the ink daemon down while the app is suspended. Cheap no-op when
+    /// there's nothing to show.
+    func rearmInkRender() {
+        guard !drawing.strokes.isEmpty else { return }
+        hasConfirmedLiveRenderOnce = false
+        loadedInkNeedsRender = true
+        forcedRenderAttempts = 0
+        InkRenderReadiness.shared.ensureWarmupStarted()
+        if window != nil { renderLoadedInkWhenReady() }
     }
 
     private var isMidStroke: Bool {

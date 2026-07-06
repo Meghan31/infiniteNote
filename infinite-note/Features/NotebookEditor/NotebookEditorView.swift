@@ -103,6 +103,10 @@ struct NotebookEditorView: View {
 
     @EnvironmentObject private var themeManager: ThemeManager
 
+    /// Foreground returns re-verify that saved ink is actually visible —
+    /// the ink render daemon can die while the app sits suspended.
+    @Environment(\.scenePhase) private var scenePhase
+
     /// Swatches shown in the color popover. Black leads (it auto-inverts to
     /// white on a dark page); the rest are vivid hues that read on both
     /// white and black pages.
@@ -209,6 +213,23 @@ struct NotebookEditorView: View {
             .onDisappear {
                 viewModel.commitPendingEdits()
                 viewModel.saveCurrentDrawing()
+            }
+            // Ink can silently stop rendering while the app is suspended
+            // (handwritingd teardown) — on every return to the foreground,
+            // re-verify and re-show the fallback if needed.
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active { viewModel.reassertInkVisibilityIfNeeded() }
+            }
+            // The database recovered from its temporary in-memory fallback
+            // while this notebook was open: re-read the real pages so the
+            // user's content appears without a force-quit.
+            .onReceive(NotificationCenter.default.publisher(for: DatabaseManager.didReopenNotification)) { _ in
+                viewModel.load()
+            }
+            // The ink renderer came (back) up: upgrade any approximated/blank
+            // sidebar thumbnails to real PencilKit renders, once.
+            .onReceive(NotificationCenter.default.publisher(for: InkRenderReadiness.didBecomeReadyNotification)) { _ in
+                viewModel.rendererDidRecover()
             }
             // Apply a newly picked notebook cover photo.
             .onChange(of: coverPhotoItem) { _, item in
