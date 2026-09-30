@@ -321,6 +321,9 @@ struct NotebookListView: View {
                 }
             }
         }
+        // Swipe left anywhere on the sidebar closes it (sets the binding
+        // directly — the system swipe alone snapped back on iPadOS 26).
+        .background(SidebarSwipeToClose(onSwipeLeft: { hideBooksSidebar() }))
         .navigationTitle("InfiniteNote")
         .navigationBarTitleDisplayMode(.large)
         .searchable(text: $searchText, prompt: "Search notebooks")
@@ -353,26 +356,9 @@ struct NotebookListView: View {
             }
         }
         .navigationBarBackButtonHidden(true)
-        .toolbar {
-            ToolbarItemGroup(placement: .navigationBarLeading) {
-                JigglingIconButton(duration: 0.2, action: { toggleBooksSidebar() }) {
-                    AssetIcon(
-                        asset: "book-sidebar",
-                        systemName: "sidebar.left",
-                        size: 34,
-                        fallbackTint: themeManager.iconTint
-                    )
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Toggle books sidebar")
-
-                // ☀/🌙 — next to the book-sidebar icon (was a floating
-                // overlay that covered the folder edit button).
-                ThemeToggleButton(size: 38)
-            }
-        }
+        // Books-sidebar toggle + ☀/🌙 (see ShelfToolbar.swift — no glass
+        // capsule clipping the icons on iPadOS 26).
+        .shelfToolbar(onToggleBooks: { toggleBooksSidebar() })
         .toolbar(removing: .sidebarToggle)
         .background(SidebarToggleHider().frame(width: 0, height: 0))
     }
@@ -381,6 +367,11 @@ struct NotebookListView: View {
         withAnimation(.easeOut(duration: 0.22)) {
             columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
         }
+    }
+
+    private func hideBooksSidebar() {
+        guard columnVisibility != .detailOnly else { return }
+        withAnimation(.easeOut(duration: 0.22)) { columnVisibility = .detailOnly }
     }
 
     /// Closes a notebook's editor tab before it gets deleted.

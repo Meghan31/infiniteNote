@@ -45,7 +45,8 @@ final class NotebookEditorViewModel {
     var isDarkTheme = false {
         didSet {
             editController.isDark = isDarkTheme
-            refreshInkFallback()
+            // Re-tint the safety image only if it's actually on screen.
+            if showInkFallback { refreshInkFallback() }
         }
     }
 
@@ -93,7 +94,7 @@ final class NotebookEditorViewModel {
         editController.setDrawing = { [weak self] newDrawing in
             guard let self else { return }
             self.drawing = newDrawing
-            self.refreshInkFallback()
+            self.syncInkFallbackAfterEdit()
             // Apply synchronously so a lasso lift/merge shows immediately;
             // safe here because drawing is disabled in lasso mode (no
             // in-flight stroke to cancel).
@@ -229,8 +230,18 @@ final class NotebookEditorViewModel {
 
     func onDrawingChanged(_ newDrawing: PKDrawing) {
         drawing = newDrawing
-        refreshInkFallback()
+        syncInkFallbackAfterEdit()
         saveCurrentDrawingDebounced()
+    }
+
+    /// After the USER changes ink, the safety image is only kept in step if it
+    /// is ALREADY showing (renderer outage) or the page is now empty. It is
+    /// never raised just because the user drew: the live canvas is already
+    /// painting that stroke, and a Core Graphics copy underneath doubled every
+    /// line — the "strokes turn bold until I reopen the notebook" bug. If live
+    /// ink is ever genuinely missing, the canvas calls `liveInkIsMissing()`.
+    private func syncInkFallbackAfterEdit() {
+        if showInkFallback || drawing.strokes.isEmpty { refreshInkFallback() }
     }
 
     func saveCurrentDrawing() {
@@ -399,8 +410,11 @@ final class NotebookEditorViewModel {
     /// Re-renders the daemon-independent ink layer for the current page. It is
     /// only shown until the live canvas is pixel-verified, so original
     /// PencilKit ink styling wins whenever it is available.
-    private func refreshInkFallback() {
-        guard let page = currentPage, !drawing.strokes.isEmpty else {
+    /// `source` overrides the (debounced) bound `drawing` — used when the canvas
+    /// reports missing ink, so the image matches the LIVE strokes exactly.
+    private func refreshInkFallback(from source: PKDrawing? = nil) {
+        let ink = source ?? drawing
+        guard let page = currentPage, !ink.strokes.isEmpty else {
             inkFallbackImage = nil
             showInkFallback = false
             return
@@ -411,7 +425,7 @@ final class NotebookEditorViewModel {
             return
         }
         inkFallbackImage = StrokeImageRenderer.image(
-            for: drawing, size: PaperSpec.size, darkTheme: isDarkTheme)
+            for: ink, size: PaperSpec.size, darkTheme: isDarkTheme)
         showInkFallback = (inkFallbackImage != nil)
     }
 
@@ -421,6 +435,15 @@ final class NotebookEditorViewModel {
     func liveInkDidRender() {
         liveInkVisiblePageId = currentPage?.id
         refreshInkFallback()
+    }
+
+    /// Called by the canvas when a pixel check proves PencilKit is NOT painting
+    /// the current ink (renderer outage). Show the safety image built from the
+    /// LIVE strokes (the bound copy lags ~400 ms) so no writing looks lost.
+    func liveInkIsMissing() {
+        guard let page = currentPage else { return }
+        if liveInkVisiblePageId == page.id { liveInkVisiblePageId = nil }
+        refreshInkFallback(from: canvasController.canvasView?.drawing)
     }
 
     private func loadPageBackground() {

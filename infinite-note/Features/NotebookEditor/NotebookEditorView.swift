@@ -188,6 +188,9 @@ struct NotebookEditorView: View {
             .navigationBarTitleDisplayMode(.inline)
             .navigationBarBackButtonHidden(true)
             .toolbar { editorToolbar }
+            // Books-sidebar toggle + ☀/🌙 (see ShelfToolbar.swift — no glass
+            // capsule clipping the icons on iPadOS 26).
+            .shelfToolbar(onToggleBooks: onToggleBooksSidebar)
             .toolbar(removing: .sidebarToggle)
             // Immersive (write-only / read-only) modes: navigation bar and
             // status bar go away too.
@@ -929,7 +932,8 @@ struct NotebookEditorView: View {
                 onZoomSettle: { settleZoom() },
                 onLiveInkRendered: {
                     withAnimation(.easeOut(duration: 0.25)) { viewModel.liveInkDidRender() }
-                }
+                },
+                onLiveInkMissing: { viewModel.liveInkIsMissing() }
             )
             // Selection/lasso interaction sits ABOVE the ink and is active
             // only while the Lasso tool is selected.
@@ -1744,24 +1748,7 @@ struct NotebookEditorView: View {
 
     @ToolbarContentBuilder
     private var editorToolbar: some ToolbarContent {
-        // Books (notebook list) sidebar toggle + theme switch.
-        ToolbarItemGroup(placement: .navigationBarLeading) {
-            JigglingIconButton(duration: 0.2, action: { onToggleBooksSidebar() }) {
-                AssetIcon(
-                    asset: "book-sidebar",
-                    systemName: "sidebar.left",
-                    size: 34,
-                    fallbackTint: themeManager.iconTint
-                )
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Toggle books sidebar")
-
-            // ☀/🌙 — next to the book-sidebar icon.
-            ThemeToggleButton(size: 38)
-        }
+        // Books sidebar toggle + theme switch live in `.shelfToolbar` (editorChrome).
         ToolbarItemGroup(placement: .navigationBarTrailing) {
             // Scale / ruler
             JigglingIconButton(duration: 0.2, action: { viewModel.isRulerActive.toggle() }) {
