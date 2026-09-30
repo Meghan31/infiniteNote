@@ -8,10 +8,10 @@ import UIKit
 /// live `PKCanvasView` and offscreen `PKDrawing.image()` come back blank), this
 /// still paints the saved ink so the user can see their page instead of a blank.
 ///
-/// It is an APPROXIMATION — each stroke is drawn as a smoothed, constant-width
-/// line in the ink's colour. Pen and ordinary handwriting look nearly identical;
-/// textured inks (pencil/crayon/watercolour) and pressure taper are simplified.
-/// It is display-only and never touches the saved drawing.
+/// It is an approximation, but it uses each saved PencilKit sample's width and
+/// opacity so pressure, fountain-pen taper, and highlighter alpha stay close to
+/// the original. Textured inks (pencil/crayon/watercolour) are simplified.
+/// Display-only and never touches the saved drawing.
 enum StrokeImageRenderer {
 
     /// Renders `drawing` at the page/canvas coordinate size. `darkTheme` mirrors
@@ -36,51 +36,148 @@ enum StrokeImageRenderer {
     }
 
     private static func draw(_ stroke: PKStroke, in cg: CGContext, darkTheme: Bool) {
-        // Collect the stroke's control points (location + width). This is the
-        // same path data the app's StrokeRefiner already walks.
-        var points: [(location: CGPoint, width: CGFloat)] = []
+        // Collect the stroke's control points. This is the same path data the
+        // app's StrokeRefiner already walks; using each sample's width avoids
+        // flattening fountain/custom pen strokes into a normal monoline pen.
+        var points: [(location: CGPoint, width: CGFloat, opacity: CGFloat)] = []
         for point in stroke.path {
-            points.append((point.location, max(0.5, point.size.width)))
+            points.append((
+                point.location,
+                max(0.5, point.size.width),
+                max(0.05, min(1, CGFloat(point.opacity)))
+            ))
         }
         guard let first = points.first else { return }
 
         let color = displayColor(for: stroke.ink, darkTheme: darkTheme)
-        // Representative width: the median keeps a few huge/tiny samples from
-        // skewing the whole stroke.
-        let width = medianWidth(points.map(\.width))
+        let baseAlpha = color.cgColor.alpha
 
         cg.saveGState()
         cg.concatenate(stroke.transform)
-        cg.setStrokeColor(color.cgColor)
-        cg.setFillColor(color.cgColor)
-        cg.setLineWidth(width)
+        cg.setLineCap(.round)
+        cg.setLineJoin(.round)
 
         if points.count == 1 {
             // A single tap — draw a dot.
+            let width = first.width
             let r = width / 2
+            cg.setFillColor(color.withAlphaComponent(baseAlpha * first.opacity).cgColor)
             cg.fillEllipse(in: CGRect(x: first.location.x - r, y: first.location.y - r,
                                       width: width, height: width))
         } else {
-            let path = CGMutablePath()
-            path.move(to: first.location)
-            if points.count == 2 {
-                path.addLine(to: points[1].location)
-            } else {
-                // Smooth through the control points with quadratic curves to the
-                // midpoints — turns a sparse polyline into a clean curve.
-                for i in 1..<(points.count - 1) {
-                    let current = points[i].location
-                    let next = points[i + 1].location
-                    let mid = CGPoint(x: (current.x + next.x) / 2,
-                                      y: (current.y + next.y) / 2)
-                    path.addQuadCurve(to: mid, control: current)
-                }
-                path.addLine(to: points[points.count - 1].location)
-            }
-            cg.addPath(path)
-            cg.strokePath()
+            drawVariableWidthStroke(points, color: color, baseAlpha: baseAlpha, in: cg)
         }
         cg.restoreGState()
+    }
+
+    /// Builds one filled outline for the whole stroke. This avoids the
+    /// "beads"/stop-marks caused by drawing every PencilKit sample as a short
+    /// rounded segment, and it keeps highlighter strokes from darkening
+    /// themselves at every internal overlap.
+    private static func drawVariableWidthStroke(
+        _ points: [(location: CGPoint, width: CGFloat, opacity: CGFloat)],
+        color: UIColor,
+        baseAlpha: CGFloat,
+        in cg: CGContext
+    ) {
+        var left: [CGPoint] = []
+        var right: [CGPoint] = []
+        left.reserveCapacity(points.count)
+        right.reserveCapacity(points.count)
+
+        for index in points.indices {
+            let previous = points[max(points.startIndex, index - 1)].location
+            let next = points[min(points.index(before: points.endIndex), index + 1)].location
+            let current = points[index].location
+            var dx = next.x - previous.x
+            var dy = next.y - previous.y
+            let length = hypot(dx, dy)
+            if length > 0.001 {
+                dx /= length
+                dy /= length
+            } else {
+                dx = 1
+                dy = 0
+            }
+
+            let halfWidth = points[index].width / 2
+            let normal = CGPoint(x: -dy, y: dx)
+            left.append(CGPoint(
+                x: current.x + normal.x * halfWidth,
+                y: current.y + normal.y * halfWidth
+            ))
+            right.append(CGPoint(
+                x: current.x - normal.x * halfWidth,
+                y: current.y - normal.y * halfWidth
+            ))
+        }
+
+        guard left.count > 1, right.count > 1 else { return }
+
+        let averageOpacity = points.map(\.opacity).reduce(0, +) / CGFloat(points.count)
+        cg.setFillColor(color.withAlphaComponent(baseAlpha * averageOpacity).cgColor)
+
+        let outline = CGMutablePath()
+        addSmoothedPolyline(left, to: outline, moveToFirst: true)
+        addSmoothedPolyline(right.reversed(), to: outline, moveToFirst: false)
+        outline.closeSubpath()
+        cg.addPath(outline)
+        cg.fillPath()
+
+        // Round caps. Filled separately so the main outline can stay smooth
+        // without per-sample overlap artifacts.
+        if let first = points.first, let last = points.last {
+            drawCap(at: first.location, width: first.width, color: color,
+                    alpha: baseAlpha * first.opacity, in: cg)
+            drawCap(at: last.location, width: last.width, color: color,
+                    alpha: baseAlpha * last.opacity, in: cg)
+        }
+    }
+
+    private static func addSmoothedPolyline<S: Sequence>(
+        _ sequence: S,
+        to path: CGMutablePath,
+        moveToFirst: Bool
+    ) where S.Element == CGPoint {
+        let points = Array(sequence)
+        guard let first = points.first else { return }
+        if moveToFirst {
+            path.move(to: first)
+        } else {
+            path.addLine(to: first)
+        }
+        guard points.count > 1 else { return }
+        if points.count == 2 {
+            path.addLine(to: points[1])
+            return
+        }
+        for index in 1..<(points.count - 1) {
+            let current = points[index]
+            let next = points[index + 1]
+            let mid = CGPoint(x: (current.x + next.x) / 2,
+                              y: (current.y + next.y) / 2)
+            path.addQuadCurve(to: mid, control: current)
+        }
+        if let last = points.last {
+            path.addLine(to: last)
+        }
+    }
+
+    private static func drawCap(
+        at point: CGPoint,
+        width: CGFloat,
+        color: UIColor,
+        alpha: CGFloat,
+        in cg: CGContext
+    ) {
+        let radius = width / 2
+        cg.setFillColor(color.withAlphaComponent(alpha).cgColor)
+        cg.fillEllipse(in: CGRect(
+            x: point.x - radius,
+            y: point.y - radius,
+            width: width,
+            height: width
+        ))
     }
 
     /// Mirrors PencilKit's behaviour of showing dark ink as light on a dark page.
@@ -94,9 +191,4 @@ enum StrokeImageRenderer {
         return luminance < 0.25 ? UIColor(white: 1, alpha: a) : base
     }
 
-    private static func medianWidth(_ widths: [CGFloat]) -> CGFloat {
-        guard !widths.isEmpty else { return 2 }
-        let sorted = widths.sorted()
-        return sorted[sorted.count / 2]
-    }
 }

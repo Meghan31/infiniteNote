@@ -17,14 +17,12 @@ struct NotebookCreationSheet: View {
     @State private var colorIndex: Int = Color.notebookCovers.indices.randomElement() ?? 0
     @State private var photoItem: PhotosPickerItem?
     @State private var photoData: Data?
-    @State private var selectedStyle: PageStyle = .grid
+    @State private var selectedStyle: PageStyle = .plain
     /// Imported photo used as the page background when `selectedStyle == .photo`.
     @State private var pageBackgroundData: Data?
     @State private var showFileImporter = false
 
     enum CoverTab { case color, photo }
-
-    private let covers = Color.notebookCovers
 
     var body: some View {
         NavigationStack {
@@ -96,26 +94,11 @@ struct NotebookCreationSheet: View {
 
     // MARK: - Color Grid
 
+    /// 6 signature covers + ⌄ for the full palette and a custom color wheel.
     private var colorGrid: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: covers.count), spacing: 12) {
-            ForEach(covers.indices, id: \.self) { i in
-                let isSel = colorIndex == i && photoData == nil
-                Button { colorIndex = i; photoData = nil } label: {
-                    ZStack {
-                        Circle().fill(themeManager.hardShadow).frame(width: 38, height: 38).offset(x: 3, y: 3)
-                        Circle().fill(covers[i]).frame(width: 38, height: 38)
-                        Circle().strokeBorder(themeManager.outline, lineWidth: isSel ? 3.5 : 2).frame(width: 38, height: 38)
-                        if isSel {
-                            Image(systemName: "checkmark").font(.system(size: 13, weight: .black)).foregroundStyle(.white)
-                        }
-                    }
-                    .scaleEffect(isSel ? 1.12 : 1.0)
-                    .animation(.spring(response: 0.3, dampingFraction: 0.55), value: isSel)
-                }
-                .buttonStyle(.plain)
-            }
+        CoverColorPicker(colorIndex: $colorIndex, showsSelection: photoData == nil) {
+            photoData = nil   // picking a color replaces a chosen cover photo
         }
-        .padding(.vertical, 10)
     }
 
     // MARK: - Photo Picker Section
@@ -289,7 +272,6 @@ struct EditCoverSheet: View {
 
     enum CoverTab { case color, photo }
 
-    private let covers = Color.notebookCovers
     /// Swatch preselected on open — used to detect whether the user actually
     /// changed the color (see the Save button).
     private let initialColorIndex: Int
@@ -306,12 +288,16 @@ struct EditCoverSheet: View {
         self.onSavePhoto = onSavePhoto
         self.onSaveDetails = onSaveDetails
         self.onCancel = onCancel
-        // Wrap legacy out-of-range indices (the old palette went 0...7; the
-        // current one has 6 colors) so the matching swatch shows as selected.
+        // Keep extra-palette and custom colors exactly; wrap only legacy
+        // out-of-range indices (the old palette went 0...7) onto the 6
+        // signature covers so the matching swatch shows as selected.
+        let stored = notebook.coverColorIndex
         let coverCount = Color.notebookCovers.count
-        let wrapped = ((notebook.coverColorIndex % coverCount) + coverCount) % coverCount
-        self.initialColorIndex = wrapped
-        self._colorIndex = State(initialValue: wrapped)
+        let normalized = CoverColorCode.isKnown(stored)
+            ? stored
+            : ((stored % coverCount) + coverCount) % coverCount
+        self.initialColorIndex = normalized
+        self._colorIndex = State(initialValue: normalized)
         self._coverTab = State(initialValue: notebook.coverImagePath != nil ? .photo : .color)
         self._noteDescription = State(initialValue: notebook.noteDescription ?? "")
         self._author = State(initialValue: notebook.author ?? "")
@@ -328,26 +314,10 @@ struct EditCoverSheet: View {
                     .pickerStyle(.segmented).listRowBackground(Color.clear).listRowInsets(.init())
 
                     if coverTab == .color {
-                        LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: covers.count), spacing: 12) {
-                            ForEach(covers.indices, id: \.self) { i in
-                                let isSel = colorIndex == i
-                                Button { colorIndex = i } label: {
-                                    ZStack {
-                                        Circle().fill(themeManager.hardShadow).frame(width: 38, height: 38).offset(x: 3, y: 3)
-                                        Circle().fill(covers[i]).frame(width: 38, height: 38)
-                                        Circle().strokeBorder(themeManager.outline, lineWidth: isSel ? 3.5 : 2).frame(width: 38, height: 38)
-                                        if isSel {
-                                            Image(systemName: "checkmark").font(.system(size: 13, weight: .black)).foregroundStyle(.white)
-                                        }
-                                    }
-                                    .scaleEffect(isSel ? 1.12 : 1.0)
-                                    .animation(.spring(response: 0.3, dampingFraction: 0.55), value: isSel)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(.vertical, 10)
-                        .listRowBackground(themeManager.card)
+                        // Same picker as New Notebook: 6 covers, ⌄ for more,
+                        // and a custom color wheel.
+                        CoverColorPicker(colorIndex: $colorIndex)
+                            .listRowBackground(themeManager.card)
                     } else {
                         VStack(alignment: .leading, spacing: 12) {
                             if let data = photoData, let img = UIImage(data: data) {

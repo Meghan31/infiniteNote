@@ -188,6 +188,9 @@ struct NotebookEditorView: View {
             .navigationBarTitleDisplayMode(.inline)
             .navigationBarBackButtonHidden(true)
             .toolbar { editorToolbar }
+            // Books-sidebar toggle + ☀/🌙 (see ShelfToolbar.swift — no glass
+            // capsule clipping the icons on iPadOS 26).
+            .shelfToolbar(onToggleBooks: onToggleBooksSidebar)
             .toolbar(removing: .sidebarToggle)
             // Immersive (write-only / read-only) modes: navigation bar and
             // status bar go away too.
@@ -207,6 +210,13 @@ struct NotebookEditorView: View {
                 loadCustomPens()
             }
             .onDisappear {
+                viewModel.commitPendingEdits()
+                viewModel.saveCurrentDrawing()
+            }
+            // A library backup / import is about to read or change the files —
+            // write the latest strokes on this page to disk first.
+            .onReceive(NotificationCenter.default.publisher(
+                for: LibraryBackupController.willAccessLibraryNotification)) { _ in
                 viewModel.commitPendingEdits()
                 viewModel.saveCurrentDrawing()
             }
@@ -897,11 +907,10 @@ struct NotebookEditorView: View {
             // Placed objects (photos + text) live BELOW the ink so the
             // Pencil writes straight onto them.
             PageObjectsContentView(controller: viewModel.editController)
-            // Daemon-independent fallback render of the saved ink (Core
-            // Graphics, not PencilKit), shown UNDER the transparent live canvas
-            // so strokes are visible on a cold launch even while handwritingd
-            // can't rasterize. Faded out the moment the live canvas confirms a
-            // render. Non-interactive, display-only — never edited or saved.
+            // Daemon-independent render of the saved ink (Core Graphics, not
+            // PencilKit), shown UNDER the transparent live canvas only until
+            // the live PencilKit canvas proves it rendered real pixels.
+            // Non-interactive, display-only — never edited or saved.
             if viewModel.showInkFallback, let fallback = viewModel.inkFallbackImage {
                 Image(uiImage: fallback)
                     .resizable()
@@ -930,7 +939,8 @@ struct NotebookEditorView: View {
                 onZoomSettle: { settleZoom() },
                 onLiveInkRendered: {
                     withAnimation(.easeOut(duration: 0.25)) { viewModel.liveInkDidRender() }
-                }
+                },
+                onLiveInkMissing: { viewModel.liveInkIsMissing() }
             )
             // Selection/lasso interaction sits ABOVE the ink and is active
             // only while the Lasso tool is selected.
@@ -1745,24 +1755,7 @@ struct NotebookEditorView: View {
 
     @ToolbarContentBuilder
     private var editorToolbar: some ToolbarContent {
-        // Books (notebook list) sidebar toggle + theme switch.
-        ToolbarItemGroup(placement: .navigationBarLeading) {
-            JigglingIconButton(duration: 0.2, action: { onToggleBooksSidebar() }) {
-                AssetIcon(
-                    asset: "book-sidebar",
-                    systemName: "sidebar.left",
-                    size: 34,
-                    fallbackTint: themeManager.iconTint
-                )
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Toggle books sidebar")
-
-            // ☀/🌙 — next to the book-sidebar icon.
-            ThemeToggleButton(size: 38)
-        }
+        // Books sidebar toggle + theme switch live in `.shelfToolbar` (editorChrome).
         ToolbarItemGroup(placement: .navigationBarTrailing) {
             // Scale / ruler
             JigglingIconButton(duration: 0.2, action: { viewModel.isRulerActive.toggle() }) {

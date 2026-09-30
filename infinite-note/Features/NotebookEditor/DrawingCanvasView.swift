@@ -640,17 +640,26 @@ final class ManagedCanvasView: PKCanvasView {
     /// True while loaded ink still needs a forced render (the renderer wasn't
     /// confirmed up yet). See the "Cold-launch render fix" section below.
     private var loadedInkNeedsRender = false
-    /// Flips true after the live canvas is first confirmed to have rendered this
-    /// session. After that the renderer is warm, so page switches render
-    /// normally — no forced toggle (which could flash with no fallback masking
-    /// it) and no fallback image.
-    private var hasConfirmedLiveRenderOnce = false
+    /// Number of live-render retries for the currently loaded drawing.
+    private var liveRenderAttempts = 0
     /// Observer for `InkRenderReadiness.didBecomeReadyNotification` (removed on
     /// deinit and when the canvas leaves its window).
     private var renderReadyObserver: NSObjectProtocol?
     /// Invoked once the live canvas has actually rendered the loaded ink, so the
     /// host can fade out the daemon-independent fallback image shown underneath.
     var onInkRendered: (() -> Void)?
+    /// Invoked when a post-edit pixel check shows PencilKit is NOT painting the
+    /// user's ink (renderer down), so the host shows the safety image instead.
+    var onLiveInkMissing: (() -> Void)?
+    /// True once this canvas has pixel-verified that PencilKit is painting the
+    /// CURRENT page's ink. Reset on every external load (open / page switch /
+    /// erase), so each page is verified once and then never checked again.
+    private var liveInkConfirmed = false
+    /// Pending post-edit pixel check (coalesced — one per burst of strokes).
+    private var editVerifyWork: DispatchWorkItem?
+    /// Consecutive post-edit checks that found no pixels (tolerates a slow
+    /// frame or two before treating the renderer as down).
+    private var editVerifyMisses = 0
 
     deinit {
         if let renderReadyObserver {
@@ -714,20 +723,23 @@ final class ManagedCanvasView: PKCanvasView {
     //     hand-off back to live ink.
     //   • Here, the instant `InkRenderReadiness` reports the daemon can
     //     rasterize, we FORCE the live canvas to draw (toggle through an empty
-    //     drawing — any flash is hidden by the image underneath), then tell the
-    //     host (`onInkRendered`) it can fade the image out. The write detaches
-    //     the delegate so it can't autosave / refine / undo / refresh thumbnails,
-    //     reads the LIVE drawing so nothing is lost, and bails mid-stroke.
+    //     drawing — any flash is hidden by the image underneath), then snapshot
+    //     THIS canvas to prove real pixels appeared before telling the host to
+    //     hide the fallback. The write detaches the delegate so it can't
+    //     autosave / refine / undo / refresh thumbnails, reads the LIVE drawing
+    //     so nothing is lost, and bails mid-stroke.
 
     /// Called by the representable right after it assigns an externally-loaded
     /// drawing (initial open / page switch). `rendererReady` is whether PencilKit
     /// could rasterize ink at that moment.
     func inkDidLoad(rendererReady: Bool) {
+        // New page content: the previous page's verification doesn't carry over.
+        liveInkConfirmed = false
+        editVerifyMisses = 0
+        editVerifyWork?.cancel()
+        editVerifyWork = nil
         guard !drawing.strokes.isEmpty else { loadedInkNeedsRender = false; return }
-        // Once the live renderer has been confirmed working this session, page
-        // switches render normally — no fallback, no forced re-submit (which
-        // could flash with nothing masking it).
-        guard !hasConfirmedLiveRenderOnce else { loadedInkNeedsRender = false; return }
+        liveRenderAttempts = 0
         loadedInkNeedsRender = true
         InkRenderReadiness.shared.ensureWarmupStarted()
         if window != nil { renderLoadedInkWhenReady() }
@@ -754,8 +766,8 @@ final class ManagedCanvasView: PKCanvasView {
     /// Once the renderer is up, FORCES the live canvas to draw the loaded ink and
     /// then tells the host it can fade the fallback image out. If the renderer
     /// isn't up yet, warms it and waits for the readiness notification. The force
-    /// happens only in this cold-launch window (while the fallback masks any
-    /// flash); afterwards `hasConfirmedLiveRenderOnce` keeps page switches clean.
+    /// happens only in this cold-launch window while the fallback masks any
+    /// flash.
     private func renderLoadedInkWhenReady() {
         guard loadedInkNeedsRender, window != nil else { return }
         guard InkRenderReadiness.shared.isReady else {
@@ -763,22 +775,174 @@ final class ManagedCanvasView: PKCanvasView {
             startObservingRenderReadiness()
             return
         }
-        guard !isMidStroke else { return }
+        guard !isMidStroke else {
+            // Never drop the hand-off just because the user is writing — try
+            // again once the stroke lifts.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.renderLoadedInkWhenReady()
+            }
+            return
+        }
+        liveRenderAttempts += 1
         loadedInkNeedsRender = false
         stopObservingRenderReadiness()
         forceRenderToggle()
         // Re-toggle once as insurance against a transient daemon hiccup, then
-        // confirm so the host fades the fallback out and warm page switches stop
-        // using it.
+        // verify real pixels before hiding the fallback.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             guard let self, self.window != nil, !self.isMidStroke else { return }
             self.forceRenderToggle()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self else { return }
-            self.hasConfirmedLiveRenderOnce = true
-            self.onInkRendered?()
+            self?.confirmLiveRenderOrRetry()
         }
+    }
+
+    /// Hides the fallback only when a snapshot of the live canvas contains ink.
+    /// If the renderer is still blank, keep the fallback visible and retry a few
+    /// times; the user's data remains readable even if PencilKit never wakes up.
+    private func confirmLiveRenderOrRetry() {
+        guard window != nil, !liveInkConfirmed else { return }
+        guard !drawing.strokes.isEmpty else { loadedInkNeedsRender = false; return }
+        if isMidStroke {
+            // The user started writing before this check ran. Returning here
+            // used to leave the fallback up FOR GOOD — every line was then
+            // painted twice (live + fallback) and looked bold. Check again
+            // once the stroke lifts.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.confirmLiveRenderOrRetry()
+            }
+            return
+        }
+        if liveCanvasHasInkPixels() {
+            markLiveInkConfirmed()
+            return
+        }
+
+        guard liveRenderAttempts < 12 else {
+            loadedInkNeedsRender = false
+            return
+        }
+        loadedInkNeedsRender = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+            self?.renderLoadedInkWhenReady()
+        }
+    }
+
+    private func markLiveInkConfirmed() {
+        liveInkConfirmed = true
+        loadedInkNeedsRender = false
+        editVerifyMisses = 0
+        editVerifyWork?.cancel()
+        editVerifyWork = nil
+        onInkRendered?()
+    }
+
+    // MARK: - Post-edit live-ink check ("strokes turn bold" fix)
+    //
+    // SYMPTOM: while writing, a stroke looked right for a moment, then turned
+    // thick/bold; leaving the notebook and coming back made it normal again.
+    //
+    // CAUSE: a page that opened EMPTY (new page, blank page) never ran the
+    // load-time pixel check above — there was no ink to check — so it was
+    // never marked "live ink visible". The view model then re-rendered the
+    // Core Graphics safety image after every stroke and showed it UNDER the
+    // live canvas: each line was painted twice (PencilKit + CG copy), which
+    // reads as bold. Reopening ran the load-time check (the page had ink by
+    // then), which hid the copy — so the ink looked normal again.
+    //
+    // FIX: the view model no longer raises the safety image because the user
+    // drew. Instead, until this page is verified, the canvas checks its own
+    // pixels once the pen lifts: ink visible → confirm (safety image stays
+    // hidden); ink missing → ask the host for the safety image, and the
+    // normal ready-handoff forces a live render and hides it again.
+
+    /// Called by the coordinator after every user edit (stroke, erase, lasso,
+    /// refinement). Cheap no-op once the page is verified.
+    func userDidEditInk() {
+        guard !liveInkConfirmed else { return }
+        scheduleEditVerify(after: 0.15)
+    }
+
+    private func scheduleEditVerify(after delay: TimeInterval) {
+        editVerifyWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.verifyLiveInkAfterEdit() }
+        editVerifyWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func verifyLiveInkAfterEdit() {
+        editVerifyWork = nil
+        guard !liveInkConfirmed, window != nil, !drawing.strokes.isEmpty else { return }
+        // Mid-stroke: look again after this stroke lifts.
+        guard !isMidStroke else { scheduleEditVerify(after: 0.3); return }
+
+        // Only snapshot once the renderer is proven up (same rule as the
+        // load-time check — never poke PencilKit's renderer while it's down).
+        if InkRenderReadiness.shared.isReady {
+            if liveCanvasHasInkPixels() {
+                markLiveInkConfirmed()
+                return
+            }
+            // One slow frame is not an outage — look again before reacting.
+            editVerifyMisses += 1
+            if editVerifyMisses < 3 { scheduleEditVerify(after: 0.3); return }
+        }
+
+        // Live ink really isn't showing: keep the user's writing visible via
+        // the safety image, and let the ready-handoff force a live render (it
+        // pixel-verifies, then hides the safety image again).
+        editVerifyMisses = 0
+        onLiveInkMissing?()
+        liveRenderAttempts = 0
+        loadedInkNeedsRender = true
+        renderLoadedInkWhenReady()
+    }
+
+    /// Captures a small transparent snapshot of just the canvas and looks for
+    /// non-transparent pixels. The page background is outside this view, so any
+    /// meaningful alpha here means PencilKit actually painted ink.
+    private func liveCanvasHasInkPixels() -> Bool {
+        guard bounds.width > 1, bounds.height > 1 else { return false }
+        let sampleWidth = min(bounds.width, 320)
+        let sampleHeight = max(1, bounds.height * (sampleWidth / bounds.width))
+        let sampleSize = CGSize(width: sampleWidth, height: sampleHeight)
+
+        let format = UIGraphicsImageRendererFormat()
+        format.opaque = false
+        format.scale = 1
+        let image = UIGraphicsImageRenderer(size: sampleSize, format: format).image { ctx in
+            ctx.cgContext.scaleBy(x: sampleSize.width / bounds.width,
+                                  y: sampleSize.height / bounds.height)
+            drawHierarchy(in: bounds, afterScreenUpdates: true)
+        }
+        return Self.imageHasVisiblePixels(image)
+    }
+
+    private static func imageHasVisiblePixels(_ image: UIImage) -> Bool {
+        guard let cg = image.cgImage else { return false }
+        let width = cg.width
+        let height = cg.height
+        guard width > 0, height > 0 else { return false }
+
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        guard let ctx = CGContext(
+            data: &pixels,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return false }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        var index = 3
+        while index < pixels.count {
+            if pixels[index] > 12 { return true }
+            index += 4
+        }
+        return false
     }
 
     private var isMidStroke: Bool {
@@ -874,12 +1038,16 @@ struct DrawingCanvasView: UIViewRepresentable {
     /// Fired once the live canvas has rendered its loaded ink, so the host can
     /// fade out the daemon-independent fallback image (cold-launch blank fix).
     var onLiveInkRendered: () -> Void = {}
+    /// Fired when a post-edit pixel check shows live ink is NOT being painted
+    /// (renderer outage), so the host shows the safety image with current ink.
+    var onLiveInkMissing: () -> Void = {}
 
     func makeUIView(context: Context) -> ManagedCanvasView {
         let canvas = ManagedCanvasView()
         canvas.drawing        = drawing
         canvas.isRulerActive  = isRulerActive
         canvas.backgroundColor = .clear
+        canvas.isOpaque = false
         // Align PencilKit's ink inversion with OUR theme (not the system one).
         canvas.overrideUserInterfaceStyle = isDarkTheme ? .dark : .light
 
@@ -1017,6 +1185,7 @@ struct DrawingCanvasView: UIViewRepresentable {
         // renderer was ready when this initial ink was applied (if not, the
         // canvas forces a render the instant the renderer comes up).
         canvas.onInkRendered = { [weak coord] in coord?.parent.onLiveInkRendered() }
+        canvas.onLiveInkMissing = { [weak coord] in coord?.parent.onLiveInkMissing() }
         InkRenderReadiness.shared.ensureWarmupStarted()
         canvas.inkDidLoad(rendererReady: InkRenderReadiness.shared.isReady)
         return canvas
@@ -1208,6 +1377,9 @@ struct DrawingCanvasView: UIViewRepresentable {
                 guard !Task.isCancelled else { return }
                 parent.drawing = newDrawing
             }
+            // "Bold strokes" fix: until this page's live ink is pixel-verified,
+            // let the canvas confirm PencilKit actually painted this edit.
+            (canvasView as? ManagedCanvasView)?.userDidEditInk()
             if parent.toolType == .shape, pendingShapeRecognitionStartCount != nil {
                 scheduleShapeRecognition(on: canvasView)
             }

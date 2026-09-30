@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // MARK: - InfiniteNote Cartoon Color System
 //
@@ -90,9 +91,78 @@ extension Color {
         .pineTeal,      // leaf green
     ]
 
-    /// Safe accessor — wraps any stored index (including legacy 0...7
-    /// indices from before the palette migration) onto the current covers.
+    /// The extra covers behind the ⌄ button in the cover picker (the 6 above
+    /// always come first). Stored as `CoverColorCode.extendedBase + offset`.
+    /// APPEND ONLY — a stored cover remembers its position in this list.
+    static let notebookCoverExtras: [Color] = [
+        // reds · pinks · oranges
+        Color(hex: "E63946"), Color(hex: "C9184A"), Color(hex: "FF5D8F"), Color(hex: "FF8FA3"),
+        Color(hex: "FFB4A2"), Color(hex: "FF8C42"), Color(hex: "FFD6A5"),
+        // yellows · greens
+        Color(hex: "F4A261"), Color(hex: "E9C46A"), Color(hex: "FFE066"), Color(hex: "CAFFBF"),
+        Color(hex: "8AC926"), Color(hex: "52B788"), Color(hex: "1B4332"),
+        // teals · blues · purples
+        Color(hex: "2A9D8F"), Color(hex: "90E0EF"), Color(hex: "4CC9F0"), Color(hex: "A0C4FF"),
+        Color(hex: "4361EE"), Color(hex: "1D3557"), Color(hex: "B388EB"),
+        // purples · neutrals
+        Color(hex: "E0AAFF"), Color(hex: "7209B7"), Color(hex: "A47148"), Color(hex: "D4A373"),
+        Color(hex: "6C757D"), Color(hex: "2B2D42"),
+    ]
+
+    /// Safe accessor for a stored cover color (see `CoverColorCode`):
+    /// the 6 signature covers, the extra palette, or a custom RGB color.
+    /// Legacy out-of-range indices (the old 0...7 palette) still wrap onto
+    /// the signature covers, exactly as before.
     static func notebookCover(at index: Int) -> Color {
-        notebookCovers[((index % notebookCovers.count) + notebookCovers.count) % notebookCovers.count]
+        if let rgb = CoverColorCode.customRGB(from: index) {
+            return Color(.sRGB,
+                         red: Double((rgb >> 16) & 0xFF) / 255,
+                         green: Double((rgb >> 8) & 0xFF) / 255,
+                         blue: Double(rgb & 0xFF) / 255,
+                         opacity: 1)
+        }
+        if let extra = CoverColorCode.extraOffset(from: index) {
+            return notebookCoverExtras[extra]
+        }
+        return notebookCovers[((index % notebookCovers.count) + notebookCovers.count) % notebookCovers.count]
+    }
+}
+
+// MARK: - Cover color codes
+//
+// A notebook's cover color is still ONE integer (`cover_color_index`), so no
+// database migration is needed and backups / old app versions keep working:
+//
+//   0 ..< 6                → the signature covers (unchanged)
+//   100 ..< 100 + extras   → `Color.notebookCoverExtras` (100+ so the legacy
+//                            0...7 indices keep meaning what they always did)
+//   0x1000000 + 0xRRGGBB   → a custom color picked with the color wheel
+
+enum CoverColorCode {
+    static let extendedBase = 100
+    static let customBase = 0x1000000
+
+    static func isCustom(_ index: Int) -> Bool { customRGB(from: index) != nil }
+
+    static func customRGB(from index: Int) -> Int? {
+        index >= customBase && index < customBase + 0x1000000 ? index - customBase : nil
+    }
+
+    static func extraOffset(from index: Int) -> Int? {
+        let offset = index - extendedBase
+        return Color.notebookCoverExtras.indices.contains(offset) ? offset : nil
+    }
+
+    /// True for any code this build can show exactly (not a legacy index).
+    static func isKnown(_ index: Int) -> Bool {
+        Color.notebookCovers.indices.contains(index) || extraOffset(from: index) != nil || isCustom(index)
+    }
+
+    /// Encodes any color as a custom cover code (opacity ignored).
+    static func custom(_ color: Color) -> Int {
+        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+        UIColor(color).getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        func byte(_ value: CGFloat) -> Int { Int((min(max(value, 0), 1) * 255).rounded()) }
+        return customBase + (byte(red) << 16 | byte(green) << 8 | byte(blue))
     }
 }
