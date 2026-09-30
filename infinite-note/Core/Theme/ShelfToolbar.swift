@@ -30,6 +30,9 @@ struct ShelfButtons: View {
             .accessibilityLabel("Toggle books sidebar")
 
             ThemeToggleButton(size: 38)
+
+            // Local backup: save the whole library to one file / import one.
+            BackupMenuButton(size: 38)
         }
         // Breathing room for the hard shadows, which are drawn down-right.
         .padding(.leading, 2)

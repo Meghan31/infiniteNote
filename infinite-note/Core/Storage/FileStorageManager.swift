@@ -274,4 +274,45 @@ final class FileStorageManager {
             [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
         try? fm.setAttributes(attrs, ofItemAtPath: url.path)
     }
+
+    // MARK: - Library backup support (Core/Backup)
+    //
+    // Read-only views of the on-disk layout, so the backup code never
+    // duplicates the file-naming rules above.
+
+    var notebooksRootDirectory: URL { rootURL }
+    var foldersRootDirectory: URL { foldersRootURL }
+
+    func notebookDirectoryURL(notebookId: String) -> URL {
+        notebookDirectory(notebookId: notebookId)
+    }
+
+    func drawingFileURL(notebookId: String, pageId: String) -> URL {
+        drawingURL(notebookId: notebookId, pageId: pageId)
+    }
+
+    func coverImageFileURL(notebookId: String) -> URL {
+        coverImageURL(notebookId: notebookId)
+    }
+
+    func pageBackgroundFileURL(notebookId: String, pageId: String) -> URL {
+        pageBackgroundURL(notebookId: notebookId, pageId: pageId)
+    }
+
+    func folderDirectoryURL(folderId: String) -> URL {
+        folderDirectory(folderId: folderId)
+    }
+
+    func folderImageFileURL(folderId: String) -> URL {
+        folderImageURL(folderId: folderId)
+    }
+
+    /// Applies the app's file-protection class to `url` and everything in it.
+    func applyFileProtection(recursivelyAt url: URL) {
+        makeAccessible(url)
+        guard let items = FileManager.default.enumerator(at: url, includingPropertiesForKeys: nil) else { return }
+        for case let item as URL in items {
+            makeAccessible(item)
+        }
+    }
 }

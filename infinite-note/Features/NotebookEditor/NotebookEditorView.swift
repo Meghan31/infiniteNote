@@ -213,6 +213,13 @@ struct NotebookEditorView: View {
                 viewModel.commitPendingEdits()
                 viewModel.saveCurrentDrawing()
             }
+            // A library backup / import is about to read or change the files —
+            // write the latest strokes on this page to disk first.
+            .onReceive(NotificationCenter.default.publisher(
+                for: LibraryBackupController.willAccessLibraryNotification)) { _ in
+                viewModel.commitPendingEdits()
+                viewModel.saveCurrentDrawing()
+            }
             // Apply a newly picked notebook cover photo.
             .onChange(of: coverPhotoItem) { _, item in
                 guard let item else { return }

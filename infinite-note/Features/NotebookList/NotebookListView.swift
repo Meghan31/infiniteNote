@@ -87,6 +87,18 @@ struct NotebookListView: View {
             }
         }
         .toolbar(removing: .sidebarToggle)
+        // Local backup (shelf button): file picker, "backup ready" sheet,
+        // duplicate choice, progress + results. Open notebooks are closed
+        // before an import writes, and the library reloads after it.
+        .libraryBackupUI(
+            onWillImport: {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    openNotebooks.removeAll()
+                    selectedNotebook = nil
+                }
+            },
+            onDidImport: { viewModel.loadNotebooks() }
+        )
         .onAppear {
             viewModel.loadNotebooks()
             // Warm up PencilKit's ink renderer (handwritingd) while the user is
