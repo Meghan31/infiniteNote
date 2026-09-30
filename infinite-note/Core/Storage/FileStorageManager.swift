@@ -2,6 +2,17 @@ import Foundation
 import PencilKit
 import UIKit
 
+enum FileStorageError: LocalizedError {
+    case protectedDataUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .protectedDataUnavailable:
+            return "Notebook files are locked by iPadOS. Unlock the device and try again."
+        }
+    }
+}
+
 final class FileStorageManager {
     static let shared = FileStorageManager()
 
@@ -14,8 +25,9 @@ final class FileStorageManager {
     // No eager directory creation here: every save path builds its full
     // directory chain on demand (`withIntermediateDirectories: true`) and
     // THROWS to its caller on failure — so storage problems surface at the
-    // point of use instead of being silently swallowed at init. Loads check
-    // `fileExists` first, so a missing root is fine before the first save.
+    // point of use instead of being silently swallowed at init. Drawing loads
+    // first verify that protected files are available, so a locked iPad can
+    // never be mistaken for a blank page and then saved back to disk.
     private init() {}
 
     // MARK: - Drawing
@@ -23,12 +35,18 @@ final class FileStorageManager {
     func saveDrawing(_ drawing: PKDrawing, notebookId: String, pageId: String) throws {
         let url = drawingURL(notebookId: notebookId, pageId: pageId)
         try ensureNotebookDirectory(notebookId: notebookId)
-        try drawing.dataRepresentation().write(to: url)
+        try backupExistingDrawingIfNeeded(at: url, notebookId: notebookId, pageId: pageId)
+        try drawing.dataRepresentation().write(to: url, options: .atomic)
+        makeAccessible(url)
     }
 
     func loadDrawing(notebookId: String, pageId: String) throws -> PKDrawing {
+        try ensureProtectedDataAvailable()
+        makeAccessible(rootURL)
+        makeAccessible(notebookDirectory(notebookId: notebookId))
         let url = drawingURL(notebookId: notebookId, pageId: pageId)
         guard FileManager.default.fileExists(atPath: url.path) else { return PKDrawing() }
+        makeAccessible(url)
         let data = try Data(contentsOf: url)
         return try PKDrawing(data: data)
     }
@@ -38,11 +56,15 @@ final class FileStorageManager {
     func saveCoverImage(_ data: Data, notebookId: String) throws {
         try ensureNotebookDirectory(notebookId: notebookId)
         let url = coverImageURL(notebookId: notebookId)
-        try data.write(to: url)
+        try data.write(to: url, options: .atomic)
+        makeAccessible(url)
     }
 
     func loadCoverImage(notebookId: String) -> UIImage? {
+        makeAccessible(rootURL)
+        makeAccessible(notebookDirectory(notebookId: notebookId))
         let url = coverImageURL(notebookId: notebookId)
+        makeAccessible(url)
         guard FileManager.default.fileExists(atPath: url.path),
               let data = try? Data(contentsOf: url) else { return nil }
         return UIImage(data: data)
@@ -58,11 +80,15 @@ final class FileStorageManager {
     func savePageBackground(_ data: Data, notebookId: String, pageId: String) throws {
         try ensureNotebookDirectory(notebookId: notebookId)
         let url = pageBackgroundURL(notebookId: notebookId, pageId: pageId)
-        try data.write(to: url)
+        try data.write(to: url, options: .atomic)
+        makeAccessible(url)
     }
 
     func loadPageBackground(notebookId: String, pageId: String) -> UIImage? {
+        makeAccessible(rootURL)
+        makeAccessible(notebookDirectory(notebookId: notebookId))
         let url = pageBackgroundURL(notebookId: notebookId, pageId: pageId)
+        makeAccessible(url)
         guard FileManager.default.fileExists(atPath: url.path),
               let data = try? Data(contentsOf: url) else { return nil }
         return UIImage(data: data)
@@ -81,11 +107,15 @@ final class FileStorageManager {
     func savePageObjectImage(_ data: Data, notebookId: String, fileName: String) throws {
         try ensureNotebookDirectory(notebookId: notebookId)
         let url = pageObjectImageURL(notebookId: notebookId, fileName: fileName)
-        try data.write(to: url)
+        try data.write(to: url, options: .atomic)
+        makeAccessible(url)
     }
 
     func loadPageObjectImage(notebookId: String, fileName: String) -> UIImage? {
+        makeAccessible(rootURL)
+        makeAccessible(notebookDirectory(notebookId: notebookId))
         let url = pageObjectImageURL(notebookId: notebookId, fileName: fileName)
+        makeAccessible(url)
         guard FileManager.default.fileExists(atPath: url.path),
               let data = try? Data(contentsOf: url) else { return nil }
         return UIImage(data: data)
@@ -111,11 +141,18 @@ final class FileStorageManager {
     func saveFolderImage(_ data: Data, folderId: String) throws {
         let dir = folderDirectory(folderId: folderId)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try data.write(to: folderImageURL(folderId: folderId))
+        makeAccessible(foldersRootURL)
+        makeAccessible(dir)
+        let url = folderImageURL(folderId: folderId)
+        try data.write(to: url, options: .atomic)
+        makeAccessible(url)
     }
 
     func loadFolderImage(folderId: String) -> UIImage? {
+        makeAccessible(foldersRootURL)
+        makeAccessible(folderDirectory(folderId: folderId))
         let url = folderImageURL(folderId: folderId)
+        makeAccessible(url)
         guard FileManager.default.fileExists(atPath: url.path),
               let data = try? Data(contentsOf: url) else { return nil }
         return UIImage(data: data)
@@ -167,8 +204,74 @@ final class FileStorageManager {
         notebookDirectory(notebookId: notebookId).appendingPathComponent("\(pageId)_bg.jpg")
     }
 
+    private func drawingBackupDirectory(notebookId: String, pageId: String) -> URL {
+        notebookDirectory(notebookId: notebookId)
+            .appendingPathComponent("drawing-backups", isDirectory: true)
+            .appendingPathComponent(pageId, isDirectory: true)
+    }
+
     private func ensureNotebookDirectory(notebookId: String) throws {
         let dir = notebookDirectory(notebookId: notebookId)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        makeAccessible(rootURL)
+        makeAccessible(dir)
+    }
+
+    private func backupExistingDrawingIfNeeded(
+        at url: URL,
+        notebookId: String,
+        pageId: String
+    ) throws {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return }
+        let data = try Data(contentsOf: url)
+        guard data.count > 1024,
+              let drawing = try? PKDrawing(data: data),
+              !drawing.strokes.isEmpty else { return }
+
+        let backupDir = drawingBackupDirectory(notebookId: notebookId, pageId: pageId)
+        try fm.createDirectory(at: backupDir, withIntermediateDirectories: true)
+        makeAccessible(backupDir.deletingLastPathComponent())
+        makeAccessible(backupDir)
+
+        let stamp = Int(Date().timeIntervalSince1970 * 1000)
+        let backupURL = backupDir.appendingPathComponent("\(stamp).drawing")
+        try data.write(to: backupURL, options: .atomic)
+        makeAccessible(backupURL)
+        pruneDrawingBackups(in: backupDir, keeping: 8)
+    }
+
+    private func pruneDrawingBackups(in directory: URL, keeping limit: Int) {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ), files.count > limit else { return }
+
+        let sorted = files.sorted {
+            let lhsDate = (try? $0.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate) ?? .distantPast
+            let rhsDate = (try? $1.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate) ?? .distantPast
+            return lhsDate > rhsDate
+        }
+        for oldBackup in sorted.dropFirst(limit) {
+            try? fm.removeItem(at: oldBackup)
+        }
+    }
+
+    private func ensureProtectedDataAvailable() throws {
+        guard UIApplication.shared.isProtectedDataAvailable else {
+            throw FileStorageError.protectedDataUnavailable
+        }
+    }
+
+    private func makeAccessible(_ url: URL) {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return }
+        let attrs: [FileAttributeKey: Any] =
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
+        try? fm.setAttributes(attrs, ofItemAtPath: url.path)
     }
 }

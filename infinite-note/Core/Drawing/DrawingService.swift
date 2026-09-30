@@ -120,19 +120,15 @@ final class DrawingService: @unchecked Sendable {
             source = usable ? CGSize(width: bounds.maxX, height: bounds.maxY) : fallback
         }
 
-        // Render strokes under an explicit trait so ink inversion matches
-        // the in-app page (black-on-white light, white-on-black dark).
-        // Skip the Metal render entirely when there's no ink (objects-only page).
-        var strokeImage: UIImage?
-        if !drawing.strokes.isEmpty {
-            var img = UIImage()
-            let render = {
-                img = drawing.image(from: CGRect(origin: .zero, size: source), scale: 1.0)
-            }
-            UITraitCollection(userInterfaceStyle: isDark ? .dark : .light)
-                .performAsCurrent(render)
-            strokeImage = img
-        }
+        // Use the same daemon-independent stroke renderer as the editor safety
+        // layer. `PKDrawing.image(...)` can return blank while handwritingd is
+        // unsettled, which made the page sidebar show empty ruled/grid pages
+        // even though the saved drawing file contained strokes.
+        let strokeImage = StrokeImageRenderer.image(
+            for: drawing,
+            size: source,
+            darkTheme: isDark
+        )
 
         // Placed objects render beneath the ink, in the same source space.
         let objectsImage = PageObjectRenderer.renderImage(

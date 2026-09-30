@@ -897,11 +897,10 @@ struct NotebookEditorView: View {
             // Placed objects (photos + text) live BELOW the ink so the
             // Pencil writes straight onto them.
             PageObjectsContentView(controller: viewModel.editController)
-            // Daemon-independent fallback render of the saved ink (Core
-            // Graphics, not PencilKit), shown UNDER the transparent live canvas
-            // so strokes are visible on a cold launch even while handwritingd
-            // can't rasterize. Faded out the moment the live canvas confirms a
-            // render. Non-interactive, display-only — never edited or saved.
+            // Daemon-independent render of the saved ink (Core Graphics, not
+            // PencilKit), shown UNDER the transparent live canvas only until
+            // the live PencilKit canvas proves it rendered real pixels.
+            // Non-interactive, display-only — never edited or saved.
             if viewModel.showInkFallback, let fallback = viewModel.inkFallbackImage {
                 Image(uiImage: fallback)
                     .resizable()

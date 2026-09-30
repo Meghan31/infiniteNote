@@ -14,18 +14,13 @@ final class NotebookEditorViewModel {
     var isRulerActive = false
     var pageBackgroundImage: UIImage? = nil
 
-    /// Daemon-independent fallback render of the current page's ink (drawn with
-    /// Core Graphics, not PencilKit) shown UNDER the live canvas so saved
-    /// strokes are visible on a cold launch even while `handwritingd` can't
-    /// rasterize. Display-only — never persisted, never edited.
+    /// Daemon-independent render of the current page's ink (drawn with Core
+    /// Graphics, not PencilKit) shown UNDER the live canvas only while the live
+    /// PencilKit canvas has not proven that it painted real pixels.
+    /// Display-only — never persisted.
     var inkFallbackImage: UIImage? = nil
-    /// Whether the fallback image should currently be shown. Set when a page
-    /// loads with ink; cleared once the live canvas confirms it has rendered.
+    /// Whether the safety ink image should currently be shown.
     var showInkFallback = false
-    /// Flips true the first time the live canvas confirms a render this session.
-    /// After that the renderer is warm, so page turns skip the fallback (the
-    /// live canvas draws straight away) and never flash the approximation.
-    private var liveRenderConfirmed = false
 
     /// Bumped ONLY when `drawing` is replaced externally (page switch, erase,
     /// load). `DrawingCanvasView` pushes the binding onto the live canvas only
@@ -48,7 +43,10 @@ final class NotebookEditorViewModel {
     /// Mirrors the app theme so the controller seeds new text in a visible
     /// colour and renders ink snapshots under the right trait. Set by the view.
     var isDarkTheme = false {
-        didSet { editController.isDark = isDarkTheme }
+        didSet {
+            editController.isDark = isDarkTheme
+            refreshInkFallback()
+        }
     }
 
     /// Called after a notebook-level change (cover / default style) so the
@@ -60,6 +58,18 @@ final class NotebookEditorViewModel {
     private let storage = FileStorageManager.shared
     private let pageObjectService = PageObjectService.shared
     private var saveTask: Task<Void, Never>?
+    /// Page ID whose drawing was successfully loaded into `drawing` /
+    /// the live canvas. If a load fails (protected files, I/O error,
+    /// corrupt drawing data), saves are blocked so a blank first render can
+    /// never overwrite the real page on close.
+    private var loadedDrawingPageId: String?
+    /// Current page ID whose live `PKCanvasView` has been pixel-verified.
+    /// When this matches `currentPage?.id`, the exact PencilKit ink is visible
+    /// and the approximate safety layer must stay hidden.
+    private var liveInkVisiblePageId: String?
+    /// Last drawing that was successfully loaded from or saved to disk.
+    /// Close/page-switch/export saves skip when nothing actually changed.
+    private var lastPersistedDrawing = PKDrawing()
     /// True after a stroke-save failure has been surfaced; reset by the next
     /// successful save. Keeps the ~500 ms autosave from spamming one alert
     /// per stroke while the disk stays full.
@@ -83,6 +93,7 @@ final class NotebookEditorViewModel {
         editController.setDrawing = { [weak self] newDrawing in
             guard let self else { return }
             self.drawing = newDrawing
+            self.refreshInkFallback()
             // Apply synchronously so a lasso lift/merge shows immediately;
             // safe here because drawing is disabled in lasso mode (no
             // in-flight stroke to cancel).
@@ -154,6 +165,8 @@ final class NotebookEditorViewModel {
             pages.append(page)
             currentPageIndex = pages.count - 1
             drawing = PKDrawing()
+            loadedDrawingPageId = page.id
+            lastPersistedDrawing = drawing
             drawingLoadToken += 1
             pageBackgroundImage = nil
             refreshInkFallback()
@@ -216,11 +229,17 @@ final class NotebookEditorViewModel {
 
     func onDrawingChanged(_ newDrawing: PKDrawing) {
         drawing = newDrawing
+        refreshInkFallback()
         saveCurrentDrawingDebounced()
     }
 
     func saveCurrentDrawing() {
         guard let page = currentPage else { return }
+        guard loadedDrawingPageId == page.id else {
+            errorMessage = "This page did not finish loading, so InfiniteNote "
+                + "did not save over it. Unlock the iPad and reopen the notebook."
+            return
+        }
         // Pull the LIVE drawing straight from the canvas first. The bound
         // `drawing` copy can lag the canvas by up to ~400 ms (the
         // coordinator's debounce), which used to silently drop strokes drawn
@@ -231,6 +250,7 @@ final class NotebookEditorViewModel {
         if let liveDrawing = canvasController.canvasView?.drawing {
             drawing = liveDrawing
         }
+        guard drawing != lastPersistedDrawing else { return }
         do {
             try drawingService.saveDrawing(drawing, for: page)
             hasWarnedSaveFailure = false
@@ -245,6 +265,7 @@ final class NotebookEditorViewModel {
             }
             return
         }
+        lastPersistedDrawing = drawing
         try? notebookService.touchNotebook(notebook)
         // Trigger thumbnail refresh for the saved page
         thumbnailRefreshTriggers[page.id, default: 0] += 1
@@ -353,15 +374,38 @@ final class NotebookEditorViewModel {
 
     private func loadCurrentDrawing() throws {
         defer { drawingLoadToken += 1; refreshInkFallback() }   // push to canvas + refresh fallback
-        guard let page = currentPage else { drawing = PKDrawing(); return }
-        drawing = try drawingService.loadDrawing(for: page)
+        guard let page = currentPage else {
+            drawing = PKDrawing()
+            loadedDrawingPageId = nil
+            liveInkVisiblePageId = nil
+            lastPersistedDrawing = drawing
+            return
+        }
+        loadedDrawingPageId = nil
+        liveInkVisiblePageId = nil
+        do {
+            let loadedDrawing = try drawingService.loadDrawing(for: page)
+            drawing = loadedDrawing
+            lastPersistedDrawing = loadedDrawing
+            loadedDrawingPageId = page.id
+        } catch {
+            drawing = PKDrawing()
+            lastPersistedDrawing = drawing
+            liveInkVisiblePageId = nil
+            throw error
+        }
     }
 
-    /// Re-renders the daemon-independent ink fallback for the current page. It's
-    /// shown only until the live canvas confirms a render this session (after
-    /// which the renderer is warm and page turns draw live straight away).
+    /// Re-renders the daemon-independent ink layer for the current page. It is
+    /// only shown until the live canvas is pixel-verified, so original
+    /// PencilKit ink styling wins whenever it is available.
     private func refreshInkFallback() {
-        guard !liveRenderConfirmed, !drawing.strokes.isEmpty else {
+        guard let page = currentPage, !drawing.strokes.isEmpty else {
+            inkFallbackImage = nil
+            showInkFallback = false
+            return
+        }
+        guard liveInkVisiblePageId != page.id else {
             inkFallbackImage = nil
             showInkFallback = false
             return
@@ -371,11 +415,12 @@ final class NotebookEditorViewModel {
         showInkFallback = (inkFallbackImage != nil)
     }
 
-    /// Called by the canvas once the LIVE PencilKit canvas has actually rendered
-    /// its ink — hands off from the fallback image to the real canvas.
+    /// Called only after the canvas snapshots non-empty live PencilKit pixels.
+    /// At that point the exact PencilKit styling is visible, so hide the
+    /// approximate safety layer.
     func liveInkDidRender() {
-        liveRenderConfirmed = true
-        showInkFallback = false
+        liveInkVisiblePageId = currentPage?.id
+        refreshInkFallback()
     }
 
     private func loadPageBackground() {
